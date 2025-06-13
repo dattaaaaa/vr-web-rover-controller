@@ -1,0 +1,17 @@
+{
+    "name": "render-quest-stream",
+    "version": "1.0.0",
+    "description": "Stream mobile camera to Quest 2 and show controller input.",
+    "main": "server.js",
+    "scripts": {
+      "start": "node server.js",
+      "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "dependencies": {
+      "express": "^4.18.2",
+      "ws": "^8.13.0"
+    },
+    "engines": {
+      "node": ">=18.0.0"
+    }
+  }
