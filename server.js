@@ -9,10 +9,14 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Store clients. For simplicity, we assume one mobile and one quest.
-// In a more robust app, you'd use rooms or session IDs.
-let mobileClient = null;
-let questClient = null;
+// Serve index.html at the root
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+let ipWebcamUrl = null; // Store the current IP Webcam URL
+let questViewers = new Set();
+let mobileConfigurator = null;
 
 wss.on('connection', (ws) => {
     console.log('Client connected');
@@ -22,89 +26,96 @@ wss.on('connection', (ws) => {
         try {
             data = JSON.parse(message);
         } catch (e) {
-            console.error('Invalid JSON message:', message);
+            console.error('Invalid JSON message:', message.toString());
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON format' }));
             return;
         }
 
-        console.log('Received:', data.type);
+        console.log(`Received from ${ws.role || 'unknown'}:`, data.type);
 
         switch (data.type) {
-            case 'register_mobile':
-                console.log('Mobile registered');
-                mobileClient = ws;
-                ws.role = 'mobile';
-                break;
-            case 'register_quest':
-                console.log('Quest registered');
-                questClient = ws;
-                ws.role = 'quest';
-                // If mobile is already waiting, notify quest
-                if (mobileClient && mobileClient.readyState === WebSocket.OPEN) {
-                    questClient.send(JSON.stringify({ type: 'mobile_ready' }));
+            case 'register_mobile_configurator':
+                console.log('Mobile configurator registered');
+                if (mobileConfigurator && mobileConfigurator !== ws && mobileConfigurator.readyState === WebSocket.OPEN) {
+                    mobileConfigurator.close(1000, "New configurator connected, closing old session.");
                 }
-                break;
-            case 'offer':
-                // Forward offer from mobile to quest
-                if (questClient && questClient.readyState === WebSocket.OPEN) {
-                    console.log('Forwarding offer to Quest');
-                    questClient.send(JSON.stringify(data));
+                mobileConfigurator = ws;
+                ws.role = 'mobile_configurator';
+                // Send current URL if already set, so the input field can be populated
+                if (ipWebcamUrl) {
+                    ws.send(JSON.stringify({ type: 'url_ack', url: ipWebcamUrl, message: 'Retrieved current URL from server' }));
                 } else {
-                    console.log('Quest not ready for offer');
+                     ws.send(JSON.stringify({ type: 'url_ack', url: null, message: 'No URL set on server yet' }));
                 }
                 break;
-            case 'answer':
-                // Forward answer from quest to mobile
-                if (mobileClient && mobileClient.readyState === WebSocket.OPEN) {
-                    console.log('Forwarding answer to Mobile');
-                    mobileClient.send(JSON.stringify(data));
+
+            case 'register_quest_viewer':
+                console.log('Quest viewer registered');
+                questViewers.add(ws);
+                ws.role = 'quest_viewer';
+                if (ipWebcamUrl) {
+                    ws.send(JSON.stringify({ type: 'ip_webcam_url_update', url: ipWebcamUrl }));
                 } else {
-                    console.log('Mobile not ready for answer');
+                    ws.send(JSON.stringify({ type: 'no_stream_url_set' }));
                 }
                 break;
-            case 'candidate':
-                // Forward ICE candidate to the other client
-                if (ws.role === 'mobile' && questClient && questClient.readyState === WebSocket.OPEN) {
-                    console.log('Forwarding candidate from Mobile to Quest');
-                    questClient.send(JSON.stringify(data));
-                } else if (ws.role === 'quest' && mobileClient && mobileClient.readyState === WebSocket.OPEN) {
-                    console.log('Forwarding candidate from Quest to Mobile');
-                    mobileClient.send(JSON.stringify(data));
+
+            case 'set_ip_webcam_url':
+                if (ws.role !== 'mobile_configurator') {
+                    ws.send(JSON.stringify({type: 'error', message: 'Not authorized to set URL'}));
+                    return;
+                }
+                const newUrl = data.url;
+                if (typeof newUrl === 'string' && (newUrl.startsWith('http://') || newUrl.startsWith('https://'))) {
+                    ipWebcamUrl = newUrl;
+                    console.log('IP Webcam URL set to:', ipWebcamUrl);
+                    ws.send(JSON.stringify({ type: 'url_ack', url: ipWebcamUrl, message: 'URL successfully updated on server' }));
+                    questViewers.forEach(viewerWs => {
+                        if (viewerWs.readyState === WebSocket.OPEN) {
+                            viewerWs.send(JSON.stringify({ type: 'ip_webcam_url_update', url: ipWebcamUrl }));
+                        }
+                    });
+                } else {
+                    console.log('Invalid IP Webcam URL received:', newUrl);
+                    ws.send(JSON.stringify({ type: 'error', message: 'Invalid URL format. Must start with http:// or https://' }));
                 }
                 break;
-            case 'controller_input':
-                // Broadcast controller input to Quest client (for display)
-                // In this setup, the Quest client itself is displaying its own input.
-                // If other clients needed to see it, you'd broadcast more widely.
-                if (questClient && questClient.readyState === WebSocket.OPEN) {
-                    console.log('Sending controller input back to Quest');
-                    questClient.send(JSON.stringify(data));
+
+            case 'controller_input': // From Quest
+                if (ws.role !== 'quest_viewer') {
+                    console.log("Controller input from non-Quest client. Ignoring.");
+                    return;
+                }
+                // Relay controller input back to the specific Quest client that sent it
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(data)); // data already includes type: 'controller_input'
                 }
                 break;
+
             default:
                 console.log('Unknown message type:', data.type);
+                ws.send(JSON.stringify({ type: 'error', message: `Unknown command: ${data.type}` }));
         }
     });
 
     ws.on('close', () => {
-        console.log('Client disconnected. Role:', ws.role);
-        if (ws.role === 'mobile') {
-            mobileClient = null;
-            if (questClient && questClient.readyState === WebSocket.OPEN) {
-                questClient.send(JSON.stringify({ type: 'mobile_disconnected' }));
-            }
-        } else if (ws.role === 'quest') {
-            questClient = null;
+        console.log(`Client disconnected. Role: ${ws.role || 'unknown'}`);
+        if (ws.role === 'quest_viewer') {
+            questViewers.delete(ws);
+            console.log('Quest viewer count:', questViewers.size);
+        } else if (ws === mobileConfigurator) {
+            mobileConfigurator = null;
+            console.log('Mobile configurator disconnected.');
         }
     });
 
     ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
+        console.error(`WebSocket error (Role: ${ws.role || 'unknown'}):`, error.message);
     });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
-    console.log(`Open http://localhost:${PORT}/mobile.html on your phone`);
-    console.log(`Open http://localhost:${PORT}/quest.html on your Quest`);
+    console.log(`Access application at: http://localhost:${PORT}/ (or your Render URL)`);
 });
