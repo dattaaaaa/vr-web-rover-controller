@@ -78,10 +78,10 @@ app.get('/proxied-stream', async (req, res) => {
     });
 });
 
-wss.on('connection', (ws) => { // START OF BLOCK 1
+wss.on('connection', (ws) => {
     console.log('WebSocket: Client connected');
 
-    ws.on('message', (message) => { // START OF BLOCK 2
+    ws.on('message', (message) => {
         let data;
         try {
             data = JSON.parse(message);
@@ -92,7 +92,7 @@ wss.on('connection', (ws) => { // START OF BLOCK 1
         }
         console.log(`WebSocket: Received from ${ws.role || 'unknown'}:`, data.type);
 
-        switch (data.type) { // START OF BLOCK 3
+        switch (data.type) {
             case 'register_mobile_configurator':
                 console.log('WebSocket: Mobile configurator registered');
                 if (mobileConfigurator && mobileConfigurator !== ws && mobileConfigurator.readyState === WebSocket.OPEN) {
@@ -121,8 +121,7 @@ wss.on('connection', (ws) => { // START OF BLOCK 1
             case 'set_ip_webcam_url':
                 if (ws.role !== 'mobile_configurator') {
                     ws.send(JSON.stringify({type: 'error', message: 'Not authorized to set URL'}));
-                    // return; // Using return inside switch case is fine, but break is more conventional if not last op
-                } else { // Added else to make sure only one path is taken if authorized
+                } else {
                     const newUrl = data.url;
                     if (typeof newUrl === 'string' && (newUrl.startsWith('http://') || newUrl.startsWith('https://'))) {
                         ipWebcamUrl = newUrl;
@@ -138,14 +137,13 @@ wss.on('connection', (ws) => { // START OF BLOCK 1
                         console.log('WebSocket: Invalid IP Webcam URL received:', newUrl);
                         ws.send(JSON.stringify({ type: 'error', message: 'Invalid URL format. Must start with http:// or https://' }));
                     }
-                } // End of else block
+                }
                 break;
 
             case 'controller_input':
                 if (ws.role !== 'quest_viewer') {
                     console.log("WebSocket: Controller input from non-Quest client, ignoring.");
-                    // return; // Using return is fine
-                } else { // Added else
+                } else {
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify(data));
                     }
@@ -155,11 +153,10 @@ wss.on('connection', (ws) => { // START OF BLOCK 1
             default:
                 console.log('WebSocket: Unknown message type:', data.type);
                 ws.send(JSON.stringify({ type: 'error', message: `Unknown command: ${data.type}` }));
-                // No break needed for default if it's the last case.
-        } // END OF BLOCK 3 (switch)
-    }); // END OF BLOCK 2 (ws.on('message'))
+        }
+    });
 
-    ws.on('close', () => { // START OF BLOCK 4
+    ws.on('close', () => {
         console.log(`WebSocket: Client disconnected. Role: ${ws.role || 'unknown'}`);
         if (ws.role === 'quest_viewer') {
             questViewers.delete(ws);
@@ -168,13 +165,13 @@ wss.on('connection', (ws) => { // START OF BLOCK 1
             mobileConfigurator = null;
             console.log('WebSocket: Mobile configurator disconnected.');
         }
-    }); // END OF BLOCK 4 (ws.on('close'))
+    });
 
-    ws.onerror = (error) => { // START OF BLOCK 5
+    ws.onerror = (error) => {
         console.error(`WebSocket error (Role: ${ws.role || 'unknown'}):`, error.message);
-    }); // END OF BLOCK 5 (ws.onerror)
+    };
 
-}); // END OF BLOCK 1 (wss.on('connection'))  <--- THIS IS STILL THE LINE IN QUESTION
+});
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
