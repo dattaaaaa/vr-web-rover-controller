@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Camera Stream to Quest</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        body {
+            text-align: center; /* Center main container */
+        }
+        .container {
+            max-width: 700px;
+            margin: 30px auto;
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: left; /* Align text left within container */
+        }
+        .container h1, .container h2 {
+            text-align: center;
+        }
+        .nav-buttons {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .nav-buttons .button { /* Style <a> tags as buttons */
+            margin: 10px;
+            padding: 15px 30px;
+            font-size: 18px;
+        }
+        .instructions ol {
+            padding-left: 20px; /* Indent list items */
+        }
+        .instructions ol li {
+            margin-bottom: 10px;
+        }
+        code {
+            background-color: #eee;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Local Camera Stream to Meta Quest</h1>
+        <p style="text-align: center;">Stream your mobile's camera to your Quest headset over your local Wi-Fi, using an IP Webcam app.</p>
+
+        <div class="nav-buttons">
+            <a href="/mobile.html" class="button">Mobile Setup (Enter IP Cam URL)</a>
+            <a href="/quest.html" class="button">Quest Viewer</a>
+        </div>
+
+        <div class="instructions">
+            <h2>How to Use:</h2>
+            <ol>
+                <li><strong>On your Mobile Phone:</strong>
+                    <ul>
+                        <li>Install an "IP Webcam" application (e.g., "IP Webcam" by Pavel Khlebovich on Android, or a similar app on iOS).</li>
+                        <li>Start the IP Webcam server in the app.</li>
+                        <li>Note the video stream URL it provides. This will be a local network URL, like <code>http://192.168.1.10:8080/video</code> (the exact path like <code>/video</code> or <code>/shot.jpg</code> or <code>/live</code> depends on your IP Webcam app).</li>
+                        <li>Ensure your mobile phone and your Meta Quest headset are connected to the <strong>same Wi-Fi network</strong>.</li>
+                    </ul>
+                </li>
+                <li><strong>On the "Mobile Setup" Page:</strong>
+                    <ul>
+                        <li>Open the <a href="/mobile.html">Mobile Setup</a> page (you can do this on your computer or another device).</li>
+                        <li>Enter the full video stream URL from your IP Webcam app and click "Set Stream URL".</li>
+                    </ul>
+                </li>
+                <li><strong>On your Meta Quest Headset:</strong>
+                    <ul>
+                        <li>Open the <a href="/quest.html">Quest Viewer</a> page in the Meta Quest Browser.</li>
+                        <li>Click "Connect for Stream URL & Controls". The video from your phone should appear.</li>
+                        <li>Click "Enter VR" to see controller inputs displayed.</li>
+                    </ul>
+                </li>
+            </ol>
+            <p style="text-align: center; margin-top: 20px;"><strong>Important:</strong> The video stream is local. The Render server only helps set up the connection and relay controller data.</p>
+        </div>
+    </div>
+</body>
+</html>
