@@ -6,33 +6,26 @@
     <title>Quest IP Cam Viewer & Controller</title>
     <link rel="stylesheet" href="style.css">
     <style>
-        #remoteStreamImg { /* Using img for MJPEG stream */
-            display: block;
-            margin: 10px auto;
-            width: 90%;
-            max-width: 640px;
-            min-height: 240px; /* Placeholder height */
-            border: 1px solid #ccc;
-            background-color: #111; /* Dark background for video area */
-            object-fit: contain;
-        }
-        .stream-container {
-            width: 100%;
-            text-align: center;
-        }
-        #controllerInfo {
-            margin-top: 20px;
+        /* ... existing styles ... */
+        #xrCanvas { /* Canvas for WebXR rendering */
+            display: none; /* Hide if not actively rendering something visible to the user */
+            /* You could give it dimensions if you were rendering to it for display,
+               but for a base layer that's just cleared, it's not strictly necessary to see it. */
+            /* width: 300px; 
+            height: 150px; 
+            border: 1px solid red; */
         }
     </style>
 </head>
 <body>
     <h1>Quest IP Cam Viewer</h1>
     <div class="stream-container">
-        <!-- MJPEG streams work well in <img> tags. -->
-        <!-- If your IP cam app provides HLS or other <video> compatible stream, use <video> -->
         <img id="remoteStreamImg" alt="IP Webcam Stream - Waiting for URL..." src="#" />
     </div>
     
+    <!-- NEW: Add the canvas element -->
+    <canvas id="xrCanvas"></canvas>
+
     <button id="connectButton">Connect for Stream URL & Controls</button>
     <button id="enterVRButton" style="display: none;">Enter VR</button>
     <p id="status">Status: Idle</p>
