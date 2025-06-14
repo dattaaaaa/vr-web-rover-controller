@@ -71,7 +71,9 @@ function setupWebSocket() {
                 if (data.url && typeof data.url === 'string') {
                     updateStatus(`Received IP Webcam URL: ${data.url}`);
                     console.log("QUEST DEBUG: Setting img src to:", data.url);
+                    remoteStreamImg.crossOrigin = "anonymous";  // ADD THIS FIRST
                     remoteStreamImg.src = data.url;
+
                     remoteStreamImg.alt = "Streaming from " + data.url;
                     remoteStreamImg.onerror = function() {
                         console.error("QUEST DEBUG: Error loading image from src:", remoteStreamImg.src);
