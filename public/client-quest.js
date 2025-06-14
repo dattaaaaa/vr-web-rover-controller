@@ -4,18 +4,21 @@ const enterVRButton = document.getElementById('enterVRButton');
 const statusDiv = document.getElementById('status');
 const controllerInfoDiv = document.getElementById('controllerInfo');
 
-// ---- NEW: Add a canvas element to your HTML or create it dynamically ----
-// For simplicity, let's assume you add this to quest.html:
-// <canvas id="xrCanvas" style="display: none;"></canvas> 
-// Or create it dynamically if you prefer not to clutter HTML for a non-visible canvas.
-let xrCanvas; // Will hold the reference to the canvas
-let gl = null; // WebGL context
-// ---- END NEW ----
+let xrCanvas;
+let gl = null;
+let shaderProgram = null;
+let videoTexture = null;
+let quadBuffer = null;
+let positionAttribLocation = null;
+let texCoordAttribLocation = null;
+let projectionUniformLocation = null;
+let modelViewUniformLocation = null;
+let textureUniformLocation = null;
 
 let ws;
 let xrSession = null;
 let xrRefSpace = null;
-let xrWebGLLayer = null; // ---- NEW ----
+let xrWebGLLayer = null;
 
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
 
@@ -36,7 +39,6 @@ connectButton.addEventListener('click', () => {
 });
 
 function setupWebSocket() {
-    // ... (WebSocket setup code remains the same) ...
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         console.log("WebSocket already open or connecting.");
         return;
@@ -44,23 +46,18 @@ function setupWebSocket() {
     ws = new WebSocket(WS_URL);
     updateStatus('Attempting to connect to server...');
 
-
     ws.onopen = () => {
         updateStatus('Connected to server. Registering as Quest Viewer...');
         ws.send(JSON.stringify({ type: 'register_quest_viewer' }));
         connectButton.style.display = 'none';
         if (navigator.xr) {
             enterVRButton.style.display = 'inline-block';
-            // ---- NEW: Get canvas reference here or create dynamically ----
             xrCanvas = document.getElementById('xrCanvas'); 
-            if (!xrCanvas) { // Fallback: create dynamically if not in HTML
+            if (!xrCanvas) {
                 xrCanvas = document.createElement('canvas');
                 xrCanvas.id = 'xrCanvas';
-                // You might want to append it to the body, though for non-rendering it might not matter
-                // document.body.appendChild(xrCanvas); 
                 console.log("Dynamically created XR canvas.");
             }
-            // ---- END NEW ----
         } else {
             updateStatus('WebXR not supported on this browser/device.', true);
         }
@@ -68,7 +65,6 @@ function setupWebSocket() {
 
     ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
-        // console.log('Quest WS received:', data.type); // Less verbose
 
         switch (data.type) {
             case 'ip_webcam_url_update':
@@ -85,6 +81,10 @@ function setupWebSocket() {
                     remoteStreamImg.onload = function() {
                         console.log("QUEST DEBUG: Image loaded successfully from src:", remoteStreamImg.src);
                         updateStatus(`Streaming from ${remoteStreamImg.src}`);
+                        // Update video texture if in VR
+                        if (xrSession && videoTexture) {
+                            updateVideoTexture();
+                        }
                     };
                 } else {
                     updateStatus('Received invalid or empty IP Webcam URL. Stream will not start.', true);
@@ -116,9 +116,8 @@ function setupWebSocket() {
         remoteStreamImg.src = "#";
         remoteStreamImg.alt = "Disconnected. Refresh to connect.";
         ws = null;
-        // If VR session was active, good idea to try and end it
         if (xrSession) {
-            onXRSessionEnded(); // Call our cleanup
+            onXRSessionEnded();
         }
     };
 
@@ -128,48 +127,225 @@ function setupWebSocket() {
     };
 }
 
+// WebGL shader creation functions
+function createShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error('Error compiling shader:', gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+    }
+    
+    return shader;
+}
+
+function createShaderProgram(gl) {
+    const vertexShaderSource = `
+        attribute vec4 aVertexPosition;
+        attribute vec2 aTextureCoord;
+        
+        uniform mat4 uModelViewMatrix;
+        uniform mat4 uProjectionMatrix;
+        
+        varying vec2 vTextureCoord;
+        
+        void main() {
+            gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+            vTextureCoord = aTextureCoord;
+        }
+    `;
+    
+    const fragmentShaderSource = `
+        precision mediump float;
+        varying vec2 vTextureCoord;
+        uniform sampler2D uSampler;
+        
+        void main() {
+            gl_FragColor = texture2D(uSampler, vTextureCoord);
+        }
+    `;
+    
+    const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+    
+    if (!vertexShader || !fragmentShader) {
+        return null;
+    }
+    
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error('Error linking shader program:', gl.getProgramInfoLog(program));
+        return null;
+    }
+    
+    return program;
+}
+
+function initWebGLResources() {
+    // Create shader program
+    shaderProgram = createShaderProgram(gl);
+    if (!shaderProgram) {
+        updateStatus('Failed to create shader program', true);
+        return false;
+    }
+    
+    // Get attribute and uniform locations
+    positionAttribLocation = gl.getAttribLocation(shaderProgram, 'aVertexPosition');
+    texCoordAttribLocation = gl.getAttribLocation(shaderProgram, 'aTextureCoord');
+    projectionUniformLocation = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
+    modelViewUniformLocation = gl.getUniformLocation(shaderProgram, 'uModelViewMatrix');
+    textureUniformLocation = gl.getUniformLocation(shaderProgram, 'uSampler');
+    
+    // Create quad geometry (two triangles forming a rectangle)
+    const positions = [
+        -2.0, -1.5, -3.0,  // Bottom left
+         2.0, -1.5, -3.0,  // Bottom right
+         2.0,  1.5, -3.0,  // Top right
+        -2.0,  1.5, -3.0   // Top left
+    ];
+    
+    const textureCoords = [
+        0.0, 1.0,  // Bottom left
+        1.0, 1.0,  // Bottom right
+        1.0, 0.0,  // Top right
+        0.0, 0.0   // Top left
+    ];
+    
+    const indices = [0, 1, 2, 0, 2, 3];
+    
+    quadBuffer = {
+        position: gl.createBuffer(),
+        textureCoord: gl.createBuffer(),
+        indices: gl.createBuffer()
+    };
+    
+    // Position buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.position);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+    
+    // Texture coordinate buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.textureCoord);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoords), gl.STATIC_DRAW);
+    
+    // Index buffer
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadBuffer.indices);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+    
+    // Create texture for video
+    videoTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    
+    return true;
+}
+
+function updateVideoTexture() {
+    if (!videoTexture || !remoteStreamImg.complete || !remoteStreamImg.naturalWidth) {
+        return;
+    }
+    
+    gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, remoteStreamImg);
+}
+
+function drawScene(projectionMatrix, modelViewMatrix) {
+    if (!shaderProgram || !quadBuffer || !videoTexture) {
+        return;
+    }
+    
+    // Update video texture
+    updateVideoTexture();
+    
+    // Use shader program
+    gl.useProgram(shaderProgram);
+    
+    // Set uniforms
+    gl.uniformMatrix4fv(projectionUniformLocation, false, projectionMatrix);
+    gl.uniformMatrix4fv(modelViewUniformLocation, false, modelViewMatrix);
+    
+    // Bind position buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.position);
+    gl.vertexAttribPointer(positionAttribLocation, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(positionAttribLocation);
+    
+    // Bind texture coordinate buffer
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.textureCoord);
+    gl.vertexAttribPointer(texCoordAttribLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(texCoordAttribLocation);
+    
+    // Bind texture
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+    gl.uniform1i(textureUniformLocation, 0);
+    
+    // Draw the quad
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadBuffer.indices);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+}
+
+// Matrix helper functions
+function createIdentityMatrix() {
+    return new Float32Array([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    ]);
+}
 
 // --- WebXR Logic ---
 enterVRButton.addEventListener('click', async () => {
-    if (!xrSession) { // Start a new session
-        if (navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')) { // Check support first
+    if (!xrSession) {
+        if (navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')) {
             try {
                 xrSession = await navigator.xr.requestSession('immersive-vr');
                 updateStatus('VR Session Requested...');
 
-                // ---- NEW: WEBGL AND LAYER SETUP ----
-                if (!xrCanvas) { // Ensure canvas exists
+                if (!xrCanvas) {
                     updateStatus("XR Canvas not found for WebGL context.", true);
-                    await xrSession.end(); // Abort session
-                    return;
-                }
-                gl = xrCanvas.getContext('webgl', { xrCompatible: true });
-                if (!gl) {
-                    updateStatus("Failed to get WebGL context for XR.", true);
-                    await xrSession.end(); // Abort session
+                    await xrSession.end();
                     return;
                 }
                 
-                // Make sure context is compatible and set up the layer
-                await gl.makeXRCompatible(); // Important step!
+                gl = xrCanvas.getContext('webgl', { xrCompatible: true });
+                if (!gl) {
+                    updateStatus("Failed to get WebGL context for XR.", true);
+                    await xrSession.end();
+                    return;
+                }
+                
+                await gl.makeXRCompatible();
+                
+                // Initialize WebGL resources
+                if (!initWebGLResources()) {
+                    updateStatus("Failed to initialize WebGL resources.", true);
+                    await xrSession.end();
+                    return;
+                }
 
                 xrWebGLLayer = new XRWebGLLayer(xrSession, gl);
                 await xrSession.updateRenderState({ baseLayer: xrWebGLLayer });
                 updateStatus('VR Render State Updated with Layer.');
-                // ---- END NEW ----
 
                 xrSession.addEventListener('end', onXRSessionEnded);
-                // Add other listeners as needed (visibilitychange, etc.)
                 xrSession.addEventListener('visibilitychange', (event) => {
                     console.log(`XR Session visibility changed: ${event.session.visibilityState}`);
                     updateStatus(`XR visibility: ${event.session.visibilityState}`);
                 });
 
-
                 xrRefSpace = await xrSession.requestReferenceSpace('local');
                 updateStatus('VR Reference Space Acquired.');
 
-                // Start the render loop
                 xrSession.requestAnimationFrame(onXRFrame);
                 updateStatus('VR Session Started & Render Loop Active');
                 enterVRButton.textContent = 'Exit VR';
@@ -177,21 +353,20 @@ enterVRButton.addEventListener('click', async () => {
             } catch (e) {
                 console.error('Failed to start XR session:', e);
                 updateStatus(`Failed to start XR session: ${e.name} - ${e.message}`, true);
-                if (xrSession) { // Ensure session is cleaned up on error
+                if (xrSession) {
                     try { await xrSession.end(); } catch (endErr) { console.error("Error ending session after failed start:", endErr); }
                 }
-                xrSession = null; // Reset session variable
+                xrSession = null;
             }
         } else {
             updateStatus('Immersive VR not supported or WebXR not available.', true);
         }
-    } else { // End existing session
+    } else {
         try {
             await xrSession.end();
-            // onXRSessionEnded will be called by the 'end' event
         } catch (e) {
             console.error("Error ending XR session:", e);
-            onXRSessionEnded(); // Manually call if end() throws to ensure cleanup
+            onXRSessionEnded();
         }
     }
 });
@@ -203,49 +378,61 @@ function onXRSessionEnded() {
     
     xrSession = null;
     xrRefSpace = null;
-    xrWebGLLayer = null; // ---- NEW: Clear layer ----
-    // gl = null; // Optionally clear GL context if you recreate canvas each time
+    xrWebGLLayer = null;
+    
+    // Clean up WebGL resources
+    if (gl) {
+        if (shaderProgram) {
+            gl.deleteProgram(shaderProgram);
+            shaderProgram = null;
+        }
+        if (videoTexture) {
+            gl.deleteTexture(videoTexture);
+            videoTexture = null;
+        }
+        if (quadBuffer) {
+            gl.deleteBuffer(quadBuffer.position);
+            gl.deleteBuffer(quadBuffer.textureCoord);
+            gl.deleteBuffer(quadBuffer.indices);
+            quadBuffer = null;
+        }
+    }
+    
     console.log("XR Session variables cleared.");
 }
 
 function onXRFrame(time, frame) {
     if (!xrSession) {
-        // console.log("onXRFrame: No session, returning.");
         return;
     }
-    // IMPORTANT: Keep requesting frames
-    xrSession.requestAnimationFrame(onXRFrame); 
+    
+    xrSession.requestAnimationFrame(onXRFrame);
 
-    // ---- NEW: Minimal WebGL work to clear the layer ----
-    // Even if you don't draw anything, you should at least bind the framebuffer
-    // and clear it. Otherwise, you might see stale content or artifacts.
     const pose = frame.getViewerPose(xrRefSpace);
-    if (pose) {
-        if (gl && xrWebGLLayer) { // Check if gl and layer are available
-            // For each view (eye)
-            for (const view of pose.views) {
-                const viewport = xrWebGLLayer.getViewport(view);
-                if (!viewport) continue;
+    if (pose && gl && xrWebGLLayer) {
+        gl.enable(gl.DEPTH_TEST);
+        
+        for (const view of pose.views) {
+            const viewport = xrWebGLLayer.getViewport(view);
+            if (!viewport) continue;
 
-                gl.bindFramebuffer(gl.FRAMEBUFFER, xrWebGLLayer.framebuffer);
-                gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-                
-                // Clear the canvas for this view
-                // You can set any color, e.g., black or transparent if supported
-                gl.clearColor(0, 0, 0, 0); // Transparent black
-                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-                
-                // If you were drawing 3D content, you'd do it here
-                // using view.transform, view.projectionMatrix, etc.
-            }
+            gl.bindFramebuffer(gl.FRAMEBUFFER, xrWebGLLayer.framebuffer);
+            gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+            
+            // Clear the canvas
+            gl.clearColor(0.1, 0.1, 0.1, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            
+            // Draw the video quad
+            const projectionMatrix = view.projectionMatrix;
+            const viewMatrix = view.transform.inverse.matrix;
+            
+            drawScene(projectionMatrix, viewMatrix);
         }
-    } else {
-        // console.warn("onXRFrame: No pose available.");
     }
-    // ---- END NEW ----
 
-    // Controller input processing (remains the same)
-    const inputSources = frame.session.inputSources; // Use frame.session.inputSources
+    // Controller input processing
+    const inputSources = frame.session.inputSources;
     let controllerData = {
         timestamp: time,
         inputs: []
@@ -268,11 +455,6 @@ function onXRFrame(time, frame) {
             });
             controllerData.inputs.push(inputDetail);
         }
-        // You might want to remove and re-add these listeners on inputsourceschange
-        // to avoid duplicate listeners if sources are re-evaluated.
-        // For simplicity, keeping it here.
-        // source.addEventListener('selectstart', (event) => handleControllerEvent(event, 'selectstart'));
-        // source.addEventListener('selectend', (event) => handleControllerEvent(event, 'selectend'));
     }
 
     if (controllerData.inputs.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
@@ -280,10 +462,7 @@ function onXRFrame(time, frame) {
     }
 }
 
-// Function to handle controller events like selectstart/end (if you use them)
-// function handleControllerEvent(event, eventType) { ... }
-
-// Initial checks for HTTPS (same as before)
+// Initial checks for HTTPS
 if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-    // ...
+    console.warn('WebXR requires HTTPS except on localhost');
 }
