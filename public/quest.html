@@ -3,31 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Quest Receiver & Controller Input</title>
+    <title>Quest IP Cam Viewer & Controller</title>
     <link rel="stylesheet" href="style.css">
     <style>
-        #remoteVideo {
-            width: 80%;
+        #remoteStreamImg { /* Using img for MJPEG stream */
+            display: block;
+            margin: 10px auto;
+            width: 90%;
             max-width: 640px;
+            min-height: 240px; /* Placeholder height */
             border: 1px solid #ccc;
+            background-color: #111; /* Dark background for video area */
+            object-fit: contain;
+        }
+        .stream-container {
+            width: 100%;
+            text-align: center;
         }
         #controllerInfo {
             margin-top: 20px;
-            padding: 10px;
-            border: 1px solid #ddd;
-            background-color: #f9f9f9;
-            white-space: pre-wrap; /* Preserve formatting for JSON */
         }
     </style>
 </head>
 <body>
-    <h1>Quest Stream Receiver</h1>
-    <video id="remoteVideo" autoplay playsinline></video>
-    <button id="connectButton">Connect to Stream</button>
+    <h1>Quest IP Cam Viewer</h1>
+    <div class="stream-container">
+        <!-- MJPEG streams work well in <img> tags. -->
+        <!-- If your IP cam app provides HLS or other <video> compatible stream, use <video> -->
+        <img id="remoteStreamImg" alt="IP Webcam Stream - Waiting for URL..." src="#" />
+    </div>
+    
+    <button id="connectButton">Connect for Stream URL & Controls</button>
     <button id="enterVRButton" style="display: none;">Enter VR</button>
     <p id="status">Status: Idle</p>
     <h2>Controller Input:</h2>
     <div id="controllerInfo">Waiting for controller input...</div>
+    <p><a href="/" class="button-link">Back to Home</a></p>
 
     <script src="client-quest.js"></script>
 </body>
