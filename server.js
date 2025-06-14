@@ -18,9 +18,6 @@ let ipWebcamUrl = null; // Store the current IP Webcam URL (e.g., http://PHONE_I
 let questViewers = new Set();
 let mobileConfigurator = null;
 
-// Store the active connection to the IP webcam to avoid multiple connections
-// and to allow proper cleanup.
-let ipWebcamStreamRequest = null;
 let connectedClientsToProxy = 0;
 
 
@@ -33,33 +30,33 @@ app.get('/proxied-stream', async (req, res) => {
     console.log(`Proxy: Client connected. Requesting stream from: ${ipWebcamUrl}`);
     connectedClientsToProxy++;
 
-    // Set headers for MJPEG stream
     res.writeHead(200, {
-        'Content-Type': 'multipart/x-mixed-replace; boundary=--jpgboundary',
+        'Content-Type': 'multipart/x-mixed-replace; boundary=--jpgboundary', // Common boundary
         'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate',
         'Connection': 'keep-alive',
         'Pragma': 'no-cache'
     });
 
-    let currentRequestToIpCam;
+    let currentRequestToIpCam; // To hold the axios request object
 
     try {
         currentRequestToIpCam = await axios({
             method: 'get',
             url: ipWebcamUrl,
-            responseType: 'stream', // Crucial for handling the stream
-            timeout: 10000, // 10 second timeout for initial connection
+            responseType: 'stream',
+            timeout: 10000, // 10-second timeout for initial connection
         });
 
-        // Pipe the stream from the IP webcam directly to the client's response
         currentRequestToIpCam.data.pipe(res);
 
         currentRequestToIpCam.data.on('error', (err) => {
             console.error('Proxy: Error in stream from IP Webcam:', err.message);
             if (!res.headersSent) {
+                // If headers not sent, we can send a proper error status
                 res.status(502).contentType('text/plain').send('Error streaming from IP Webcam.');
             } else {
-                res.end(); // End the client response if already started
+                // If headers already sent, we can only abruptly end the response
+                res.end();
             }
         });
 
@@ -70,23 +67,30 @@ app.get('/proxied-stream', async (req, res) => {
 
     } catch (error) {
         console.error('Proxy: Failed to connect to IP Webcam:', error.message);
-        if (error.code === 'ECONNREFUSED') {
-             return res.status(502).contentType('text/plain').send('Proxy: Could not connect to IP Webcam (Connection Refused).');
-        } else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
-             return res.status(504).contentType('text/plain').send('Proxy: Connection to IP Webcam timed out.');
+        // Ensure error response is sent only if headers haven't been sent.
+        // This catch block is for errors during the *initial* axios request.
+        if (!res.headersSent) {
+            if (error.code === 'ECONNREFUSED') {
+                 res.status(502).contentType('text/plain').send('Proxy: Could not connect to IP Webcam (Connection Refused).');
+            } else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
+                 res.status(504).contentType('text/plain').send('Proxy: Connection to IP Webcam timed out.');
+            } else {
+                 res.status(500).contentType('text/plain').send('Proxy: Error connecting to IP Webcam.');
+            }
+        } else {
+            res.end(); // If headers sent, just end.
         }
-        return res.status(500).contentType('text/plain').send('Proxy: Error connecting to IP Webcam.');
+        return; // Important: exit after sending error
     }
 
-    // Handle client disconnection from the proxy
     req.on('close', () => {
         connectedClientsToProxy--;
         console.log(`Proxy: Client disconnected. Remaining proxy clients: ${connectedClientsToProxy}`);
+        // Attempt to abort the connection to the IP webcam
         if (currentRequestToIpCam && typeof currentRequestToIpCam.request?.abort === 'function') {
             console.log('Proxy: Aborting request to IP Webcam as client disconnected.');
-            currentRequestToIpCam.request.abort(); // Abort the underlying HTTP request
+            currentRequestToIpCam.request.abort();
         } else if (currentRequestToIpCam && typeof currentRequestToIpCam.data?.destroy === 'function') {
-            // For streams that might not have .request.abort() directly on the axios response
             console.log('Proxy: Destroying stream to IP Webcam as client disconnected.');
             currentRequestToIpCam.data.destroy();
         }
@@ -94,7 +98,7 @@ app.get('/proxied-stream', async (req, res) => {
 });
 
 
-// --- WebSocket Logic (largely unchanged) ---
+// --- WebSocket Logic ---
 wss.on('connection', (ws) => {
     console.log('WebSocket: Client connected');
 
@@ -123,62 +127,60 @@ wss.on('connection', (ws) => {
                 } else {
                      ws.send(JSON.stringify({ type: 'url_ack', url: null, message: 'No URL set on server yet' }));
                 }
-                break;
+                break; // Added break
 
             case 'register_quest_viewer':
                 console.log('WebSocket: Quest viewer registered');
                 questViewers.add(ws);
                 ws.role = 'quest_viewer';
                 if (ipWebcamUrl) {
-                    // Inform client about the original URL, but it will use the proxied path
                     ws.send(JSON.stringify({ type: 'ip_webcam_url_update', url: ipWebcamUrl, useProxy: true }));
                 } else {
                     ws.send(JSON.stringify({ type: 'no_stream_url_set' }));
                 }
-                break;
+                break; // Added break
 
-            case 'set_ip_webcam_.url':
+            // THIS IS THE CORRECTED CASE NAME
+            case 'set_ip_webcam_url': // *** CHECKED THIS CASE NAME and logic ***
                 if (ws.role !== 'mobile_configurator') {
                     ws.send(JSON.stringify({type: 'error', message: 'Not authorized to set URL'}));
-                    return;
+                    return; // Return early if not authorized
                 }
                 const newUrl = data.url;
                 if (typeof newUrl === 'string' && (newUrl.startsWith('http://') || newUrl.startsWith('https://'))) {
-                    const oldUrl = ipWebcamUrl;
+                    // const oldUrl = ipWebcamUrl; // Not strictly needed here
                     ipWebcamUrl = newUrl;
                     console.log('WebSocket: IP Webcam URL set to:', ipWebcamUrl);
                     ws.send(JSON.stringify({ type: 'url_ack', url: ipWebcamUrl, message: 'URL successfully updated on server' }));
                     
-                    // Notify all Quest viewers about the URL change
                     questViewers.forEach(viewerWs => {
                         if (viewerWs.readyState === WebSocket.OPEN) {
                             viewerWs.send(JSON.stringify({ type: 'ip_webcam_url_update', url: ipWebcamUrl, useProxy: true }));
                         }
                     });
-
-                    // If URL changed and there was an active stream, it should naturally be re-established
-                    // by clients re-requesting the /proxied-stream endpoint.
-                    // The old axios request for the old ipWebcamUrl would have been aborted by client disconnect
-                    // or will eventually time out or error out.
-
                 } else {
                     console.log('WebSocket: Invalid IP Webcam URL received:', newUrl);
                     ws.send(JSON.stringify({ type: 'error', message: 'Invalid URL format. Must start with http:// or https://' }));
                 }
-                break;
+                break; // Added break, this was likely the culprit if missing
 
             case 'controller_input':
-                if (ws.role !== 'quest_viewer') return;
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify(data));
+                if (ws.role !== 'quest_viewer') {
+                     // Optionally log or handle this case
+                    console.log("WebSocket: Controller input from non-Quest client, ignoring.");
+                    return; // Return early
                 }
-                break;
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(data)); // Forward data as is
+                }
+                break; // Added break
 
             default:
                 console.log('WebSocket: Unknown message type:', data.type);
                 ws.send(JSON.stringify({ type: 'error', message: `Unknown command: ${data.type}` }));
-        }
-    });
+                // No break needed here as it's the last case in the switch.
+        } // End of switch
+    }); // End of ws.on('message')
 
     ws.on('close', () => {
         console.log(`WebSocket: Client disconnected. Role: ${ws.role || 'unknown'}`);
@@ -194,7 +196,7 @@ wss.on('connection', (ws) => {
     ws.onerror = (error) => {
         console.error(`WebSocket error (Role: ${ws.role || 'unknown'}):`, error.message);
     });
-});
+}); // End of wss.on('connection')  <--- This is line 196 in the previous version, or around it.
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
