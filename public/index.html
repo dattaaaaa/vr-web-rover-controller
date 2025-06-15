@@ -2,22 +2,410 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>VR Robot Control</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR Rover Controller</title>
     <style>
-        body { margin: 0; overflow: hidden; }
-        canvas { width: 100%; height: 100% }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            overflow: hidden;
+        }
+        
+        .container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            z-index: 1000;
+        }
+        
+        .title {
+            font-size: 3em;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .status {
+            background: rgba(0,0,0,0.3);
+            padding: 20px;
+            border-radius: 15px;
+            margin: 20px 0;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .enter-vr-btn {
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            padding: 20px 40px;
+            font-size: 20px;
+            border-radius: 50px;
+            cursor: pointer;
+            margin: 20px;
+            transition: all 0.3s ease;
+            box-shadow: 0 8px 25px rgba(255,107,107,0.3);
+            text-transform: uppercase;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+        
+        .enter-vr-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 35px rgba(255,107,107,0.4);
+        }
+        
+        .enter-vr-btn:disabled {
+            background: #555;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .vr-scene {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #000;
+            display: none;
+        }
+        
+        .controls-info {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 14px;
+            z-index: 1001;
+            display: none;
+        }
+        
+        .rover-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 14px;
+            z-index: 1001;
+            display: none;
+        }
+        
+        .connection-status {
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        
+        .connected {
+            background: rgba(46, 204, 113, 0.2);
+            border: 1px solid #2ecc71;
+            color: #2ecc71;
+        }
+        
+        .disconnected {
+            background: rgba(231, 76, 60, 0.2);
+            border: 1px solid #e74c3c;
+            color: #e74c3c;
+        }
+        
+        .floating-particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: -1;
+        }
+        
+        .particle {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            background: rgba(255,255,255,0.6);
+            border-radius: 50%;
+            animation: float 6s ease-in-out infinite;
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0; }
+            50% { transform: translateY(-100px) rotate(180deg); opacity: 1; }
+        }
     </style>
 </head>
 <body>
-    <!-- Three.js Library -->
-    <script src="https://unpkg.com/three@0.157.0/build/three.min.js"></script>
-    <!-- Helper for VR Button -->
-    <script src="https://unpkg.com/three@0.157.0/examples/js/webxr/VRButton.js"></script>
-    <!-- MQTT.js Library for browsers -->
-    <script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
+    <div class="floating-particles" id="particles"></div>
     
-    <!-- Our Application Logic -->
-    <script src="client.js"></script>
+    <div class="container">
+        <h1 class="title">🤖 VR Rover Controller</h1>
+        <div class="status">
+            <p id="status-text">Initializing...</p>
+            <div id="connection-status" class="connection-status disconnected">
+                Server: Checking...
+            </div>
+            <button id="enter-vr-btn" class="enter-vr-btn" disabled>🚀 Enter VR Mode</button>
+        </div>
+    </div>
+    
+    <div class="controls-info" id="controls-info">
+        <h3>🎮 VR Controls</h3>
+        <p>• Use RIGHT thumbstick to control rover</p>
+        <p>• Forward/Backward: Move stick up/down</p>
+        <p>• Turn Left/Right: Move stick left/right</p>
+        <p>• Press ANY button to exit VR</p>
+    </div>
+    
+    <div class="rover-status" id="rover-status">
+        <h3>🤖 Rover Status</h3>
+        <div id="current-command">Command: STOP</div>
+        <div id="thumbstick-values">X: 0.0, Y: 0.0</div>
+    </div>
+    
+    <canvas id="vr-scene" class="vr-scene"></canvas>
+
+    <script>
+        class VRRoverController {
+            constructor() {
+                this.xrSession = null;
+                this.xrRefSpace = null;
+                this.gl = null;
+                this.canvas = document.getElementById('vr-scene');
+                this.statusText = document.getElementById('status-text');
+                this.enterVRBtn = document.getElementById('enter-vr-btn');
+                this.connectionStatus = document.getElementById('connection-status');
+                this.controlsInfo = document.getElementById('controls-info');
+                this.roverStatus = document.getElementById('rover-status');
+                this.currentCommand = document.getElementById('current-command');
+                this.thumbstickValues = document.getElementById('thumbstick-values');
+                
+                this.lastCommand = null;
+                this.commandThreshold = 0.3;
+                this.serverConnected = false;
+                
+                this.init();
+                this.createParticles();
+                this.checkServerStatus();
+            }
+            
+            createParticles() {
+                const container = document.getElementById('particles');
+                for (let i = 0; i < 50; i++) {
+                    const particle = document.createElement('div');
+                    particle.className = 'particle';
+                    particle.style.left = Math.random() * 100 + '%';
+                    particle.style.top = Math.random() * 100 + '%';
+                    particle.style.animationDelay = Math.random() * 6 + 's';
+                    container.appendChild(particle);
+                }
+            }
+            
+            async checkServerStatus() {
+                try {
+                    const response = await fetch('/api/status');
+                    const data = await response.json();
+                    this.serverConnected = data.status === 'online';
+                    this.updateConnectionStatus(data.mqtt);
+                } catch (error) {
+                    this.serverConnected = false;
+                    this.updateConnectionStatus(false);
+                }
+                
+                setTimeout(() => this.checkServerStatus(), 5000);
+            }
+            
+            updateConnectionStatus(mqttConnected) {
+                const status = this.connectionStatus;
+                if (this.serverConnected && mqttConnected) {
+                    status.className = 'connection-status connected';
+                    status.textContent = '✅ Server & MQTT Connected';
+                } else if (this.serverConnected) {
+                    status.className = 'connection-status disconnected';
+                    status.textContent = '⚠️ Server OK, MQTT Disconnected';
+                } else {
+                    status.className = 'connection-status disconnected';
+                    status.textContent = '❌ Server Disconnected';
+                }
+            }
+            
+            async init() {
+                if (!navigator.xr) {
+                    this.updateStatus('❌ WebXR not supported');
+                    return;
+                }
+                
+                try {
+                    const isSupported = await navigator.xr.isSessionSupported('immersive-vr');
+                    if (isSupported) {
+                        this.updateStatus('✅ VR Ready! Put on your headset');
+                        this.enterVRBtn.disabled = false;
+                        this.enterVRBtn.addEventListener('click', () => this.enterVR());
+                    } else {
+                        this.updateStatus('❌ VR not supported on this device');
+                    }
+                } catch (error) {
+                    this.updateStatus('❌ Error: ' + error.message);
+                }
+            }
+            
+            updateStatus(message) {
+                this.statusText.textContent = message;
+            }
+            
+            async enterVR() {
+                try {
+                    this.xrSession = await navigator.xr.requestSession('immersive-vr', {
+                        requiredFeatures: ['local']
+                    });
+                    
+                    this.updateStatus('🎮 VR Mode Active');
+                    document.querySelector('.container').style.display = 'none';
+                    this.controlsInfo.style.display = 'block';
+                    this.roverStatus.style.display = 'block';
+                    
+                    // WebGL setup
+                    this.gl = this.canvas.getContext('webgl', { xrCompatible: true });
+                    await this.gl.makeXRCompatible();
+                    
+                    const layer = new XRWebGLLayer(this.xrSession, this.gl);
+                    this.xrSession.updateRenderState({ baseLayer: layer });
+                    
+                    this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
+                    
+                    this.xrSession.addEventListener('end', () => this.onSessionEnd());
+                    this.xrSession.requestAnimationFrame((time, frame) => this.onXRFrame(time, frame));
+                    
+                } catch (error) {
+                    this.updateStatus('❌ Failed to enter VR: ' + error.message);
+                }
+            }
+            
+            onSessionEnd() {
+                this.updateStatus('Exited VR mode');
+                document.querySelector('.container').style.display = 'block';
+                this.controlsInfo.style.display = 'none';
+                this.roverStatus.style.display = 'none';
+                this.xrSession = null;
+                this.sendRoverCommand('STOP');
+            }
+            
+            onXRFrame(time, frame) {
+                if (!this.xrSession) return;
+                
+                const session = frame.session;
+                const pose = frame.getViewerPose(this.xrRefSpace);
+                
+                if (pose) {
+                    const layer = session.renderState.baseLayer;
+                    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, layer.framebuffer);
+                    this.gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+                    
+                    // Render VR scene
+                    this.renderScene(pose);
+                }
+                
+                // Process controllers
+                for (const inputSource of session.inputSources) {
+                    this.processController(inputSource);
+                }
+                
+                this.xrSession.requestAnimationFrame((time, frame) => this.onXRFrame(time, frame));
+            }
+            
+            renderScene(pose) {
+                // Clear with space-like background
+                this.gl.clearColor(0.05, 0.05, 0.15, 1.0);
+                this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
+                
+                // Simple 3D plane rendering would go here
+                // For now, just show the starfield effect
+            }
+            
+            processController(inputSource) {
+                const gamepad = inputSource.gamepad;
+                if (!gamepad || inputSource.handedness !== 'right') return;
+                
+                // Check for any button press to exit
+                const anyButtonPressed = gamepad.buttons.some(button => button.pressed);
+                if (anyButtonPressed) {
+                    this.xrSession.end();
+                    return;
+                }
+                
+                // Process right thumbstick (usually axes 2,3)
+                if (gamepad.axes.length >= 4) {
+                    const x = gamepad.axes[2]; // Left/Right
+                    const y = -gamepad.axes[3]; // Forward/Backward (inverted)
+                    
+                    this.thumbstickValues.textContent = `X: ${x.toFixed(2)}, Y: ${y.toFixed(2)}`;
+                    
+                    // Determine command based on thumbstick position
+                    let command = 'STOP';
+                    
+                    if (Math.abs(y) > this.commandThreshold) {
+                        if (y > 0) {
+                            command = 'FORWARD';
+                        } else {
+                            command = 'BACKWARD';
+                        }
+                    } else if (Math.abs(x) > this.commandThreshold) {
+                        if (x > 0) {
+                            command = 'TURN_RIGHT';
+                        } else {
+                            command = 'TURN_LEFT';
+                        }
+                    }
+                    
+                    // Send command if changed
+                    if (command !== this.lastCommand) {
+                        this.sendRoverCommand(command, { x, y });
+                        this.lastCommand = command;
+                    }
+                }
+            }
+            
+            async sendRoverCommand(action, data = {}) {
+                if (!this.serverConnected) return;
+                
+                try {
+                    const response = await fetch('/api/rover/control', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ action, data })
+                    });
+                    
+                    if (response.ok) {
+                        this.currentCommand.textContent = `Command: ${action}`;
+                        console.log(`🤖 Sent: ${action}`);
+                    }
+                } catch (error) {
+                    console.error('Failed to send command:', error);
+                }
+            }
+        }
+        
+        // Initialize the VR Rover Controller
+        const vrController = new VRRoverController();
+    </script>
 </body>
 </html>
