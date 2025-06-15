@@ -204,6 +204,13 @@
                 this.init();
                 this.createParticles();
                 this.checkServerStatus();
+                this.debugMode = true;
+                this.debugLog('VR Rover Controller initialized');
+                  debugLog(message) {
+                    if (this.debugMode) {
+                      console.log(`[DEBUG] ${new Date().toISOString()} - ${message}`);
+                      this.logOutput.innerHTML += `<div class="log-entry">[DEBUG] ${message}</div>`;
+                    }
             }
             
             createParticles() {
@@ -218,29 +225,47 @@
                 }
             }
             
-            async checkServerStatus() {
-              try {
-                const response = await fetch('/api/status');
-                if (!response.ok) throw new Error('Server error');
-                
-                const data = await response.json();
-                this.serverConnected = data.status === 'online';
-                this.updateConnectionStatus(data.mqtt);
-                
-                // Add this to debug MQTT connection
-                if (data.mqtt) {
-                  console.log('✅ MQTT Connected');
-                } else {
-                  console.warn('⚠️ MQTT Disconnected');
-                }
-              } catch (error) {
-                this.serverConnected = false;
-                this.updateConnectionStatus(false);
-                console.error('❌ Server connection failed:', error);
-              }
-              
-              setTimeout(() => this.checkServerStatus(), 3000);
-            }
+async checkServerStatus() {
+    try {
+      this.debugLog('Fetching /api/status');
+      const startTime = Date.now();
+      
+      const response = await fetch('/api/status', {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache'
+        }
+      });
+      
+      this.debugLog(`Response received in ${Date.now() - startTime}ms`);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! Status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      this.debugLog(`Status response: ${JSON.stringify(data)}`);
+      
+      this.serverConnected = data.status === 'online';
+      this.updateConnectionStatus(data.mqtt);
+      
+      // Add this to force UI update
+      this.updateStatus(this.serverConnected 
+        ? '✅ Connected! Ready for VR' 
+        : '❌ Server connection failed');
+    } catch (error) {
+      this.debugLog(`Status check failed: ${error.message}`);
+      this.serverConnected = false;
+      this.updateConnectionStatus(false);
+      this.updateStatus('❌ Connection error - Retrying...');
+    }
+    
+    setTimeout(() => this.checkServerStatus(), 3000);
+  }
+                  updateStatus(message) {
+    this.statusText.textContent = message;
+    this.debugLog(`UI Status: ${message}`);
+  }
             
             updateConnectionStatus(mqttConnected) {
                 const status = this.connectionStatus;
