@@ -3,37 +3,388 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Quest IP Cam Viewer & Rover Control</title>
-    <!-- Link to your existing style.css or the one provided -->
-    <link rel="stylesheet" href="style.css"> 
+    <title>Quest IP Cam Viewer & Controller</title>
     <style>
-        /* Keep specific styles from original quest.html or integrate into style.css */
-        body { text-align: center; } /* Example to center content */
-        #remoteStreamImg { max-height: 30vh; border: 1px solid black; background-color: #222; }
-        #controllerInfo { text-align: left; max-height: 25vh; overflow-y: auto; }
-        #xrCanvas { display: none; } /* Hidden as it's only for WebXR rendering context */
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+            color: #333; /* Make default text color readable */
+        }
+        .stream-container { margin: 20px 0; text-align: center; }
+        #remoteStreamImg { max-width: 100%; max-height: 400px; border: 2px solid #333; background-color: #000; }
+        #xrCanvas { display: none; width: 1px; height: 1px; }
+        button { padding: 10px 20px; margin: 10px; font-size: 16px; background-color: #007cba; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background-color: #005a87; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #status { font-weight: bold; margin: 20px 0; min-height: 1.2em; }
+        #controllerInfo { background-color: #fff; border: 1px solid #ddd; padding: 10px; margin: 20px 0; white-space: pre-wrap; font-family: monospace; max-height: 300px; overflow-y: auto; }
+        .button-link { display: inline-block; padding: 10px 20px; background-color: #28a745; color: white; text-decoration: none; border-radius: 5px; margin: 10px 0; }
+        .button-link:hover { background-color: #218838; }
+        h1, h2 { color: #333; }
     </style>
 </head>
 <body>
     <h1>Quest IP Cam Viewer & Rover Control</h1>
-    
     <div class="stream-container">
        <img id="remoteStreamImg" crossorigin="anonymous" alt="IP Webcam Stream - Waiting for URL..." src="#" />
     </div>
     
-    <!-- Canvas for WebXR rendering (hidden from UI) -->
     <canvas id="xrCanvas"></canvas>
     
-    <button id="connectButton">Connect for Stream & Controls</button>
-    <button id="enterVRButton" style="display: none;">Enter VR / Control Rover</button>
-    
-    <div id="status">Status: Idle</div>
-    
-    <h2>Controller Input & Rover Command:</h2>
+    <button id="connectButton">Connect for Stream URL & Controls</button>
+    <button id="enterVRButton" style="display: none;">Enter VR</button>
+    <p id="status">Status: Idle</p>
+    <h2>Controller Input & Rover Status:</h2>
     <div id="controllerInfo">Waiting for controller input...</div>
-    
     <p><a href="/" class="button-link">Back to Home</a></p>
     
-    <script src="client-quest.js"></script>
+    <script>
+        const remoteStreamImg = document.getElementById('remoteStreamImg');
+        const connectButton = document.getElementById('connectButton');
+        const enterVRButton = document.getElementById('enterVRButton');
+        const statusDiv = document.getElementById('status');
+        const controllerInfoDiv = document.getElementById('controllerInfo');
+
+        let xrCanvas;
+        let gl = null;
+        let shaderProgram = null;
+        let videoTexture = null;
+        let quadBuffer = null;
+        let positionAttribLocation, texCoordAttribLocation, projectionUniformLocation, modelViewUniformLocation, textureUniformLocation;
+
+        let ws;
+        let xrSession = null;
+        let xrRefSpace = null;
+        let xrWebGLLayer = null;
+
+        const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+
+        // For Rover Control
+        let lastRightThumbstickState = { pressed: false, x: 0, y: 0, sent: false };
+
+
+        function updateStatus(message, isError = false) {
+            console.log(message);
+            statusDiv.textContent = `Status: ${message}`;
+            statusDiv.style.color = isError ? 'red' : 'inherit';
+        }
+
+        function updateControllerInfo(data) {
+            controllerInfoDiv.textContent = JSON.stringify(data, null, 2);
+        }
+
+        connectButton.addEventListener('click', () => {
+            connectButton.disabled = true;
+            updateStatus('Connecting to server...');
+            setupWebSocket();
+        });
+
+        function setupWebSocket() {
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                console.log("WebSocket already open or connecting.");
+                return;
+            }
+            ws = new WebSocket(WS_URL);
+            updateStatus('Attempting to connect to server...');
+
+            ws.onopen = () => {
+                updateStatus('Connected to server. Registering as Quest Viewer...');
+                ws.send(JSON.stringify({ type: 'register_quest_viewer' }));
+                connectButton.style.display = 'none';
+                if (navigator.xr) {
+                    enterVRButton.style.display = 'inline-block';
+                    xrCanvas = document.getElementById('xrCanvas'); 
+                    if (!xrCanvas) {
+                        // Should not happen if HTML is correct
+                        xrCanvas = document.createElement('canvas');
+                        xrCanvas.id = 'xrCanvas';
+                        xrCanvas.style.display = 'none';
+                        document.body.appendChild(xrCanvas);
+                        console.warn("Dynamically created XR canvas. Ensure it's in quest.html.");
+                    }
+                } else {
+                    updateStatus('WebXR not supported on this browser/device.', true);
+                }
+            };
+
+            ws.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                switch (data.type) {
+                    case 'ip_webcam_url_update':
+                        if (data.url && typeof data.url === 'string') {
+                            const originalUrl = data.url; 
+                            const streamSrc = data.useProxy ? '/proxied-stream' : originalUrl;
+                            updateStatus(`IP Webcam URL received. Using: ${streamSrc === '/proxied-stream' ? 'proxied stream' : 'direct URL'}. Original: ${originalUrl}`);
+                            console.log("QUEST: Setting img src to:", streamSrc, " (Original:", originalUrl, ")");
+                            remoteStreamImg.src = ''; 
+                            remoteStreamImg.src = streamSrc; 
+                            remoteStreamImg.alt = "Streaming from " + (streamSrc === '/proxied-stream' ? `proxy (origin: ${originalUrl})` : originalUrl);
+                            remoteStreamImg.onerror = function() {
+                                console.error("QUEST: Error loading image from src:", remoteStreamImg.src);
+                                updateStatus(`Error loading stream from ${remoteStreamImg.src}. Original: ${originalUrl}. Check server logs, IP Cam, and network.`, true);
+                                remoteStreamImg.alt = `Failed to load: ${remoteStreamImg.src}`;
+                            };
+                            remoteStreamImg.onload = function() {
+                                console.log("QUEST: Image loaded successfully from src:", remoteStreamImg.src);
+                                updateStatus(`Streaming from ${remoteStreamImg.src}`);
+                                if (xrSession && videoTexture && gl) {
+                                    updateVideoTexture();
+                                }
+                            };
+                        } else {
+                            updateStatus('Received invalid or empty IP Webcam URL. Stream will not start.', true);
+                            remoteStreamImg.src = "#"; 
+                            remoteStreamImg.alt = "IP Webcam URL not set or invalid.";
+                        }
+                        break;
+                    case 'no_stream_url_set':
+                        updateStatus('No IP Webcam URL has been set on the server yet. Please use the Mobile Setup page.', true);
+                        remoteStreamImg.src = "#";
+                        remoteStreamImg.alt = "IP Webcam URL not set yet on server.";
+                        break;
+                    case 'error':
+                        updateStatus(`Server error: ${data.message}`, true);
+                        break;
+                    default:
+                        // console.log("Unknown message from server:", data);
+                }
+            };
+
+            ws.onclose = (event) => {
+                updateStatus(`Disconnected from server (Code: ${event.code}). Please refresh to reconnect.`, true);
+                connectButton.disabled = false;
+                connectButton.style.display = 'inline-block';
+                enterVRButton.style.display = 'none';
+                remoteStreamImg.src = "#";
+                remoteStreamImg.alt = "Disconnected. Refresh to connect.";
+                ws = null;
+                if (xrSession) {
+                    onXRSessionEnded();
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateStatus('WebSocket connection error. Check server and network.', true);
+            };
+        }
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Error compiling shader:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader); return null;
+            }
+            return shader;
+        }
+
+        function createShaderProgram(gl) {
+            const vsSrc = `attribute vec4 aVertexPosition; attribute vec2 aTextureCoord; uniform mat4 uModelViewMatrix; uniform mat4 uProjectionMatrix; varying vec2 vTextureCoord; void main() { gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition; vTextureCoord = aTextureCoord; }`;
+            const fsSrc = `precision mediump float; varying vec2 vTextureCoord; uniform sampler2D uSampler; void main() { gl_FragColor = texture2D(uSampler, vTextureCoord); }`;
+            const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+            const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+            if (!vertexShader || !fragmentShader) return null;
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader); gl.attachShader(program, fragmentShader); gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Error linking shader program:', gl.getProgramInfoLog(program)); return null;
+            }
+            return program;
+        }
+
+        function initWebGLResources() {
+            if (!gl) { console.error("initWebGLResources: WebGL context not available."); return false; }
+            shaderProgram = createShaderProgram(gl);
+            if (!shaderProgram) { updateStatus('Failed to create shader program', true); return false; }
+            positionAttribLocation = gl.getAttribLocation(shaderProgram, 'aVertexPosition');
+            texCoordAttribLocation = gl.getAttribLocation(shaderProgram, 'aTextureCoord');
+            projectionUniformLocation = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
+            modelViewUniformLocation = gl.getUniformLocation(shaderProgram, 'uModelViewMatrix');
+            textureUniformLocation = gl.getUniformLocation(shaderProgram, 'uSampler');
+            const positions = [-2.0, -1.5, -4.0, 2.0, -1.5, -4.0, 2.0, 1.5, -4.0, -2.0, 1.5, -4.0]; // W:4, H:3, Z:-4
+            const textureCoords = [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+            const indices = [0, 1, 2, 0, 2, 3];
+            quadBuffer = { position: gl.createBuffer(), textureCoord: gl.createBuffer(), indices: gl.createBuffer() };
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.position); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.textureCoord); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoords), gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadBuffer.indices); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+            videoTexture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255])); // Placeholder
+            return true;
+        }
+
+        function updateVideoTexture() {
+            if (!gl || !videoTexture || !remoteStreamImg.complete || !remoteStreamImg.naturalWidth) return;
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // IP Webcam streams often need flipping
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, remoteStreamImg);
+        }
+
+        function drawScene(projectionMatrix, modelViewMatrix) {
+            if (!gl || !shaderProgram || !quadBuffer || !videoTexture) return;
+            updateVideoTexture();
+            gl.useProgram(shaderProgram);
+            gl.uniformMatrix4fv(projectionUniformLocation, false, projectionMatrix);
+            gl.uniformMatrix4fv(modelViewUniformLocation, false, modelViewMatrix);
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.position); gl.vertexAttribPointer(positionAttribLocation, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(positionAttribLocation);
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.textureCoord); gl.vertexAttribPointer(texCoordAttribLocation, 2, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(texCoordAttribLocation);
+            gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, videoTexture); gl.uniform1i(textureUniformLocation, 0);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadBuffer.indices); gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+            gl.disableVertexAttribArray(positionAttribLocation); gl.disableVertexAttribArray(texCoordAttribLocation);
+        }
+        
+        enterVRButton.addEventListener('click', async () => {
+            if (!xrSession) {
+                if (navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')) {
+                    try {
+                        xrSession = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
+                        updateStatus('VR Session Requested...');
+                        if (!xrCanvas) { updateStatus("XR Canvas not found.", true); await xrSession.end(); xrSession = null; return; }
+                        gl = xrCanvas.getContext('webgl', { xrCompatible: true });
+                        if (!gl) { updateStatus("Failed to get WebGL context for XR.", true); await xrSession.end(); xrSession = null; return; }
+                        await gl.makeXRCompatible();
+                        if (!initWebGLResources()) { updateStatus("Failed to init WebGL resources.", true); await xrSession.end(); xrSession = null; return; }
+                        xrWebGLLayer = new XRWebGLLayer(xrSession, gl);
+                        await xrSession.updateRenderState({ baseLayer: xrWebGLLayer });
+                        updateStatus('VR Render State Updated.');
+                        xrSession.addEventListener('end', onXRSessionEnded);
+                        xrSession.addEventListener('visibilitychange', (e) => updateStatus(`XR visibility: ${e.session.visibilityState}`));
+                        try { xrRefSpace = await xrSession.requestReferenceSpace('local-floor'); } 
+                        catch (e) { console.warn("local-floor failed, trying local", e); try { xrRefSpace = await xrSession.requestReferenceSpace('local'); } 
+                        catch (e2) { console.warn("local failed, trying viewer", e2); xrRefSpace = await xrSession.requestReferenceSpace('viewer'); }}
+                        updateStatus('VR Reference Space Acquired.');
+                        lastRightThumbstickState = { pressed: false, x: 0, y: 0, sent: false }; // Reset state
+                        xrSession.requestAnimationFrame(onXRFrame);
+                        updateStatus('VR Session Started & Render Loop Active');
+                        enterVRButton.textContent = 'Exit VR';
+                    } catch (e) {
+                        console.error('Failed to start XR session:', e);
+                        updateStatus(`Failed to start XR: ${e.message}`, true);
+                        if (xrSession) { try { await xrSession.end(); } catch (ee) {} } xrSession = null;
+                    }
+                } else { updateStatus('Immersive VR not supported.', true); }
+            } else {
+                try {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                         ws.send(JSON.stringify({ type: 'rover_stick_input', input: { pressed: false, x: 0, y: 0 } }));
+                         console.log("Sent final STOP command to rover before exiting VR.");
+                    }
+                    await xrSession.end();
+                } catch (e) { console.error("Error ending XR session:", e); onXRSessionEnded(); }
+            }
+        });
+
+        function onXRSessionEnded() {
+            updateStatus('VR Session Ended');
+            if (enterVRButton) enterVRButton.textContent = 'Enter VR';
+            if (controllerInfoDiv) controllerInfoDiv.textContent = 'Exited VR. Input paused.';
+            xrSession = xrRefSpace = xrWebGLLayer = null;
+            if (gl) {
+                if (shaderProgram) { gl.deleteProgram(shaderProgram); shaderProgram = null; }
+                if (videoTexture) { gl.deleteTexture(videoTexture); videoTexture = null; }
+                if (quadBuffer) { gl.deleteBuffer(quadBuffer.position); gl.deleteBuffer(quadBuffer.textureCoord); gl.deleteBuffer(quadBuffer.indices); quadBuffer = null; }
+            }
+            positionAttribLocation = texCoordAttribLocation = projectionUniformLocation = modelViewUniformLocation = textureUniformLocation = null;
+            console.log("XR Session variables and WebGL resources cleared.");
+        }
+
+        function onXRFrame(time, frame) {
+            if (!xrSession) return;
+            xrSession.requestAnimationFrame(onXRFrame);
+            const pose = frame.getViewerPose(xrRefSpace);
+            if (pose && gl && xrWebGLLayer) {
+                gl.bindFramebuffer(gl.FRAMEBUFFER, xrWebGLLayer.framebuffer);
+                gl.enable(gl.DEPTH_TEST); gl.clearColor(0.1, 0.1, 0.2, 1.0);
+                for (const view of pose.views) {
+                    const viewport = xrWebGLLayer.getViewport(view);
+                    if (!viewport || !viewport.width || !viewport.height) continue;
+                    gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+                    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                    drawScene(view.projectionMatrix, view.transform.inverse.matrix);
+                }
+            }
+
+            let currentRightThumbstickInput = { pressed: false, x: 0, y: 0 };
+            let generalCtrlDisplay = [];
+
+            for (const source of frame.session.inputSources) {
+                let srcDisplay = { handedness: source.handedness, profiles: source.profiles.join(',') };
+                if (source.gamepad) {
+                    srcDisplay.axes = Array.from(source.gamepad.axes).map(v => v.toFixed(2));
+                    srcDisplay.buttons = source.gamepad.buttons.map((b, i) => `B${i}:${b.pressed?'P':(b.touched?'T':'_')}${b.value.toFixed(1)}`).join(' ');
+                    if (source.handedness === 'right') {
+                        const gp = source.gamepad;
+                        const btn3 = gp.buttons[3]; // Thumbstick press
+                        currentRightThumbstickInput.pressed = btn3 ? btn3.pressed : false;
+                        currentRightThumbstickInput.x = gp.axes[2] || 0;
+                        currentRightThumbstickInput.y = gp.axes[3] || 0;
+                    }
+                }
+                generalCtrlDisplay.push(srcDisplay);
+            }
+            
+            let shouldSendRoverInput = false;
+            if (currentRightThumbstickInput.pressed) {
+                shouldSendRoverInput = true;
+            } else if (lastRightThumbstickState.pressed && !currentRightThumbstickInput.pressed) {
+                shouldSendRoverInput = true; // Send one last "not pressed"
+            }
+            
+            // To reduce spam if stick is idle but pressed, only send if axes changed significantly
+            const axisChangeThreshold = 0.1; // Increased threshold for less sensitivity when pressed
+            if (currentRightThumbstickInput.pressed && lastRightThumbstickState.pressed &&
+                Math.abs(currentRightThumbstickInput.x - lastRightThumbstickState.x) < axisChangeThreshold &&
+                Math.abs(currentRightThumbstickInput.y - lastRightThumbstickState.y) < axisChangeThreshold &&
+                lastRightThumbstickState.sent) {
+                // If pressed, axes haven't changed much from last *sent* state, don't resend if we prefer less spam.
+                // However, for continuous control and ESP timeout, sending every frame might be safer.
+                // Let's ensure 'shouldSendRoverInput' remains true if pressed.
+            }
+
+
+            if (shouldSendRoverInput || currentRightThumbstickInput.pressed) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    const payload = {
+                        pressed: currentRightThumbstickInput.pressed,
+                        x: currentRightThumbstickInput.pressed ? currentRightThumbstickInput.x : 0,
+                        y: currentRightThumbstickInput.pressed ? currentRightThumbstickInput.y : 0
+                    };
+                    ws.send(JSON.stringify({ type: 'rover_stick_input', input: payload }));
+                    lastRightThumbstickState.sent = true; 
+                }
+            } else {
+                lastRightThumbstickState.sent = false; 
+            }
+
+            lastRightThumbstickState.pressed = currentRightThumbstickInput.pressed;
+            lastRightThumbstickState.x = currentRightThumbstickInput.x;
+            lastRightThumbstickState.y = currentRightThumbstickInput.y;
+
+            let displayInfo = {
+                time: time.toFixed(0),
+                visibility: xrSession ? xrSession.visibilityState : "N/A",
+                // controllers: generalCtrlDisplay, // Can be too verbose
+                rover_input: {
+                    active: currentRightThumbstickInput,
+                    last_sent_is_pressed_state: lastRightThumbstickState.sent && lastRightThumbstickState.pressed
+                }
+            };
+            updateControllerInfo(displayInfo);
+        }
+
+        if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+            console.warn('WebXR requires HTTPS for non-localhost.');
+            updateStatus('Warning: Page is not HTTPS. WebXR might not work.', true);
+        }
+    </script>
 </body>
 </html>
