@@ -17,12 +17,9 @@ const MQTT_CONFIG = {
 };
 
 let mqttClient = null;
-let mqttConnected = false;
 
-// Initialize MQTT Client with robust reconnect
+// Initialize MQTT Client
 function initMQTT() {
-  console.log('🔌 Initializing MQTT connection...');
-  
   const clientId = `vr-rover-${Math.random().toString(16).substr(2, 8)}`;
   
   mqttClient = mqtt.connect({
@@ -34,43 +31,20 @@ function initMQTT() {
     clientId: clientId,
     clean: true,
     connectTimeout: 30000,
-    reconnectPeriod: 5000,
+    reconnectPeriod: 1000,
     rejectUnauthorized: false
   });
 
   mqttClient.on('connect', () => {
-    mqttConnected = true;
-    console.log('✅ MQTT CONNECTED to broker');
-    console.log('📡 Subscribing to rover/status');
-    mqttClient.subscribe('rover/status', { qos: 1 });
-  });
-
-  mqttClient.on('message', (topic, message) => {
-    console.log(`📬 MQTT RECEIVED [${topic}]: ${message.toString()}`);
+    console.log('✅ Connected to MQTT broker');
   });
 
   mqttClient.on('error', (error) => {
-    console.error('❌ MQTT ERROR:', error.message);
-    mqttConnected = false;
+    console.error('❌ MQTT connection error:', error);
   });
 
-  mqttClient.on('offline', () => {
-    console.log('⚠️ MQTT OFFLINE');
-    mqttConnected = false;
-  });
-
-  mqttClient.on('reconnect', () => {
-    console.log('🔄 MQTT RECONNECTING...');
-  });
-
-  mqttClient.on('close', () => {
-    console.log('🔌 MQTT CONNECTION CLOSED');
-    mqttConnected = false;
-  });
-
-  mqttClient.on('disconnect', (packet) => {
-    console.log(`⚠️ MQTT DISCONNECTED: ${packet ? packet.reasonCode : 'unknown'}`);
-    mqttConnected = false;
+  mqttClient.on('disconnect', () => {
+    console.log('🔌 Disconnected from MQTT broker');
   });
 }
 
@@ -92,64 +66,41 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`🌐 ${req.method} ${req.path}`);
-  next();
-});
-
-app.use((req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  next();
-});
-
 // Routes
 app.get('/', (req, res) => {
-  console.log('📄 Serving index.html');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.get('/api/status', (req, res) => {
-  console.log('🔍 Status check - MQTT:', mqttConnected ? 'Connected' : 'Disconnected');
   res.json({
     status: 'online',
-    mqtt: mqttConnected,
-    timestamp: new Date().toISOString(),
-    rover: {
-      lastStatus: Date.now() - (Math.floor(Math.random() * 10000) // Simulated freshness
-    }
+    mqtt: mqttClient ? mqttClient.connected : false,
+    timestamp: new Date().toISOString()
   });
 });
 
 app.post('/api/rover/control', (req, res) => {
   const { action, data } = req.body;
-  console.log(`🤖 Received command: ${action}`, data);
-
-  if (!mqttConnected) {
-    console.error('❌ Command rejected: MQTT not connected');
+  
+  if (!mqttClient || !mqttClient.connected) {
     return res.status(503).json({ error: 'MQTT not connected' });
   }
 
   try {
     const topic = 'rover/control';
-    const payload = JSON.stringify({ 
-      action, 
-      data,
-      timestamp: Date.now(),
-      source: 'vr-controller'
-    });
+    const payload = JSON.stringify({ action, data, timestamp: Date.now() });
     
     mqttClient.publish(topic, payload, { qos: 1 }, (error) => {
       if (error) {
-        console.error('❌ MQTT PUBLISH ERROR:', error.message);
+        console.error('MQTT publish error:', error);
         return res.status(500).json({ error: 'Failed to send command' });
       }
       
-      console.log(`📡 MQTT PUBLISH: ${action} - ${JSON.stringify(data)}`);
+      console.log(`📡 Sent: ${action} - ${JSON.stringify(data)}`);
       res.json({ success: true, action, data });
     });
   } catch (error) {
-    console.error('🚨 COMMAND PROCESSING ERROR:', error);
+    console.error('Error sending rover command:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -158,16 +109,6 @@ app.post('/api/rover/control', (req, res) => {
 initMQTT();
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🚀 VR ROVER CONTROLLER SERVER`);
-  console.log(`⏱️ Started at: ${new Date().toLocaleString()}`);
-  console.log(`🔊 Listening on port: ${PORT}`);
-  console.log('---------------------------------------');
-  console.log('🔍 TROUBLESHOOTING TIPS:');
-  console.log('1. If MQTT fails to connect, verify credentials');
-  console.log('2. Check firewall settings for port 8883');
-  console.log('3. Test MQTT connection with:');
-  console.log(`   mqtt sub -t 'rover/#' -h ${MQTT_CONFIG.host} \\`);
-  console.log(`   -p ${MQTT_CONFIG.port} -u ${MQTT_CONFIG.username} \\`);
-  console.log(`   -P '${MQTT_CONFIG.password}' --insecure`);
-  console.log('---------------------------------------');
+  console.log(`🚀 VR Rover Controller running on port ${PORT}`);
+  console.log(`🌐 Open http://localhost:${PORT} in your browser`);
 });
