@@ -1,8 +1,11 @@
+// --- START OF FILE server.js ---
+
 const express = require('express');
 const http = require('http');
-const WebSocket = require('ws');
+const WebSocket = require('ws'); // For client (Quest, Mobile) to this server
 const path = require('path');
 const axios = require('axios');
+const mqtt = require('mqtt'); // MQTT client
 
 const app = express();
 const server = http.createServer(app);
@@ -18,6 +21,66 @@ let ipWebcamUrl = null;
 let questViewers = new Set();
 let mobileConfigurator = null;
 let connectedClientsToProxy = 0;
+
+// --- MQTT Configuration ---
+// !!! USER: Replace with your HiveMQ Cloud details !!!
+const MQTT_BROKER_URL = 'mqtts://d20951d2e2aa49e98e82561d859007d3.s1.eu.hivemq.cloud:8883'; // e.g., 'mqtts://random123.s1.eu.hivemq.cloud:8883'
+const MQTT_USERNAME = 'lunar';        // From HiveMQ Access Management
+const MQTT_PASSWORD = 'Rover123';        // From HiveMQ Access Management
+const MQTT_CONTROL_TOPIC = 'quest/rover/control'; // Topic to publish controller data to
+
+let mqttClient;
+const mqttOptions = {
+    username: MQTT_USERNAME,
+    password: MQTT_PASSWORD,
+    connectTimeout: 10000, // 10 seconds
+    // keepalive: 60, // Default is 60 seconds
+    // reconnectPeriod: 1000, // Default, ms between reconnect attempts
+};
+
+function connectToMqttBroker() {
+    if (!MQTT_BROKER_URL.includes("hivemq.cloud")) {
+        console.warn("MQTT: Broker URL seems to be a placeholder or not a HiveMQ cloud URL. Please update it in server.js.");
+    }
+    if (mqttClient && mqttClient.connected) {
+        console.log('MQTT: Already connected to broker.');
+        return;
+    }
+
+    console.log(`MQTT: Attempting to connect to broker at ${MQTT_BROKER_URL}...`);
+    mqttClient = mqtt.connect(MQTT_BROKER_URL, mqttOptions);
+
+    mqttClient.on('connect', () => {
+        console.log('MQTT: Successfully connected to MQTT broker.');
+        // You could subscribe to topics here if the server needed to receive messages
+        // mqttClient.subscribe('esp/rover/status', (err) => {
+        // if (!err) {
+        // console.log('MQTT: Subscribed to ESP status topic.');
+        // }
+        // });
+    });
+
+    mqttClient.on('reconnect', () => {
+        console.log('MQTT: Reconnecting to MQTT broker...');
+    });
+
+    mqttClient.on('error', (error) => {
+        console.error('MQTT: Connection error:', error.message);
+        // The client will attempt to reconnect automatically based on reconnectPeriod
+    });
+
+    mqttClient.on('close', () => {
+        console.log('MQTT: Disconnected from MQTT broker.');
+        // The client will attempt to reconnect automatically
+    });
+
+    // mqttClient.on('message', (topic, message) => {
+        // Handle incoming messages if subscribed
+        // console.log(`MQTT: Received message on topic ${topic}: ${message.toString()}`);
+    // });
+}
+// --- END MQTT Configuration ---
+
 
 app.get('/proxied-stream', async (req, res) => {
     if (!ipWebcamUrl) {
@@ -78,6 +141,9 @@ app.get('/proxied-stream', async (req, res) => {
     });
 });
 
+let lastMqttSendTime = 0;
+const MQTT_SEND_INTERVAL = 100; // milliseconds, send updates to ESP via MQTT every 100ms
+
 wss.on('connection', (ws) => {
     console.log('WebSocket: Client connected');
 
@@ -90,7 +156,7 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON format' }));
             return;
         }
-        console.log(`WebSocket: Received from ${ws.role || 'unknown'}:`, data.type);
+        // console.log(`WebSocket: Received from ${ws.role || 'unknown'}:`, data.type); // Less verbose
 
         switch (data.type) {
             case 'register_mobile_configurator':
@@ -142,10 +208,61 @@ wss.on('connection', (ws) => {
 
             case 'controller_input':
                 if (ws.role !== 'quest_viewer') {
-                    console.log("WebSocket: Controller input from non-Quest client, ignoring.");
-                } else {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify(data));
+                    // console.log("WebSocket: Controller input from non-Quest client, ignoring."); // Can be noisy
+                    return;
+                }
+
+                // Echo back to the Quest client for its own UI display
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(data));
+                }
+
+                // Process and send to ESP8266 via MQTT
+                if (data.input && data.input.inputs) {
+                    let rightStickX = 0;
+                    let rightStickY = 0;
+                    let rightControllerFound = false;
+
+                    for (const controller of data.input.inputs) {
+                        if (controller.handedness === 'right') {
+                            if (controller.axes && controller.axes.length >= 4) { // Standard Quest controllers
+                                rightStickX = controller.axes[2]; // Right stick X
+                                rightStickY = controller.axes[3]; // Right stick Y
+                                rightControllerFound = true;
+                                break; 
+                            }
+                        }
+                    }
+                    
+                    if (!rightControllerFound && data.input.inputs.length > 0) {
+                        const firstController = data.input.inputs[0];
+                         if (firstController.axes && firstController.axes.length >= 4) {
+                            console.log("WebSocket: Right controller not explicitly found, using first available controller's axes [2] and [3]. Handedness:", firstController.handedness);
+                            rightStickX = firstController.axes[2];
+                            rightStickY = firstController.axes[3];
+                        } else if (firstController.axes && firstController.axes.length >= 2) {
+                            console.log("WebSocket: Controller has only 2 axes. Assuming axes [0] and [1] for control (X, Y). Handedness:", firstController.handedness);
+                            rightStickX = firstController.axes[0]; 
+                            rightStickY = firstController.axes[1];
+                        }
+                    }
+
+                    if (mqttClient && mqttClient.connected) {
+                        const now = Date.now();
+                        if (now - lastMqttSendTime > MQTT_SEND_INTERVAL) {
+                            const payloadToEsp = { stickX: rightStickX, stickY: rightStickY };
+                            const payloadString = JSON.stringify(payloadToEsp);
+                            mqttClient.publish(MQTT_CONTROL_TOPIC, payloadString, (err) => {
+                                if (err) {
+                                    console.error('MQTT: Failed to publish message:', err);
+                                } else {
+                                    // console.log(`MQTT: Sent to ${MQTT_CONTROL_TOPIC}: ${payloadString}`); // Can be verbose
+                                }
+                            });
+                            lastMqttSendTime = now;
+                        }
+                    } else {
+                        // console.log("MQTT: Broker not connected, cannot send controller data."); // Can be verbose
                     }
                 }
                 break;
@@ -156,8 +273,9 @@ wss.on('connection', (ws) => {
         }
     });
 
-    ws.on('close', () => {
-        console.log(`WebSocket: Client disconnected. Role: ${ws.role || 'unknown'}`);
+    ws.on('close', (code, reason) => {
+        const reasonStr = reason ? reason.toString() : 'No reason given';
+        console.log(`WebSocket: Client disconnected (Code: ${code}, Reason: ${reasonStr}). Role: ${ws.role || 'unknown'}`);
         if (ws.role === 'quest_viewer') {
             questViewers.delete(ws);
             console.log('WebSocket: Quest viewer count:', questViewers.size);
@@ -170,11 +288,13 @@ wss.on('connection', (ws) => {
     ws.onerror = (error) => {
         console.error(`WebSocket error (Role: ${ws.role || 'unknown'}):`, error.message);
     };
-
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     console.log(`Access application at: http://localhost:${PORT}/ (or your Render URL)`);
+    console.log("Ensure ESP8266 is configured for MQTT and HiveMQ details are correct in server.js.");
+    connectToMqttBroker(); // Initial attempt to connect to MQTT broker
 });
+// --- END OF FILE server.js ---
