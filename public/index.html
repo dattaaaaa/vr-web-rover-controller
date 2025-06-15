@@ -219,17 +219,27 @@
             }
             
             async checkServerStatus() {
-                try {
-                    const response = await fetch('/api/status');
-                    const data = await response.json();
-                    this.serverConnected = data.status === 'online';
-                    this.updateConnectionStatus(data.mqtt);
-                } catch (error) {
-                    this.serverConnected = false;
-                    this.updateConnectionStatus(false);
-                }
+              try {
+                const response = await fetch('/api/status');
+                if (!response.ok) throw new Error('Server error');
                 
-                setTimeout(() => this.checkServerStatus(), 5000);
+                const data = await response.json();
+                this.serverConnected = data.status === 'online';
+                this.updateConnectionStatus(data.mqtt);
+                
+                // Add this to debug MQTT connection
+                if (data.mqtt) {
+                  console.log('✅ MQTT Connected');
+                } else {
+                  console.warn('⚠️ MQTT Disconnected');
+                }
+              } catch (error) {
+                this.serverConnected = false;
+                this.updateConnectionStatus(false);
+                console.error('❌ Server connection failed:', error);
+              }
+              
+              setTimeout(() => this.checkServerStatus(), 3000);
             }
             
             updateConnectionStatus(mqttConnected) {
