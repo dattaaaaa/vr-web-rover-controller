@@ -108,6 +108,19 @@
             display: none;
         }
         
+        .debug-info {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 12px;
+            z-index: 1001;
+            display: none;
+            max-width: 300px;
+        }
+        
         .connection-status {
             padding: 10px;
             border-radius: 8px;
@@ -177,7 +190,13 @@
     <div class="rover-status" id="rover-status">
         <h3>🤖 Rover Status</h3>
         <div id="current-command">Command: STOP</div>
-        <div id="thumbstick-values">X: 0.0, Y: 0.0</div>
+        <div id="thumbstick-values">Right Stick - X: 0.0, Y: 0.0</div>
+        <div id="controller-count">Controllers: 0</div>
+    </div>
+
+    <div class="debug-info" id="debug-info">
+        <h4>🔍 Debug Info</h4>
+        <div id="debug-log"></div>
     </div>
     
     <canvas id="vr-scene" class="vr-scene"></canvas>
@@ -194,12 +213,17 @@
                 this.connectionStatus = document.getElementById('connection-status');
                 this.controlsInfo = document.getElementById('controls-info');
                 this.roverStatus = document.getElementById('rover-status');
+                this.debugInfo = document.getElementById('debug-info');
                 this.currentCommand = document.getElementById('current-command');
                 this.thumbstickValues = document.getElementById('thumbstick-values');
+                this.controllerCount = document.getElementById('controller-count');
+                this.debugLog = document.getElementById('debug-log');
                 
                 this.lastCommand = null;
                 this.commandThreshold = 0.3;
                 this.serverConnected = false;
+                this.controllerStates = new Map();
+                this.debugMode = true; // Enable debug logging
                 
                 this.init();
                 this.createParticles();
@@ -216,6 +240,23 @@
                     particle.style.animationDelay = Math.random() * 6 + 's';
                     container.appendChild(particle);
                 }
+            }
+            
+            debugLog(message) {
+                if (!this.debugMode) return;
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.innerHTML = `[${timestamp}] ${message}`;
+                logEntry.style.marginBottom = '5px';
+                logEntry.style.fontSize = '11px';
+                this.debugLog.appendChild(logEntry);
+                
+                // Keep only last 10 entries
+                while (this.debugLog.children.length > 10) {
+                    this.debugLog.removeChild(this.debugLog.firstChild);
+                }
+                
+                console.log(`[VR DEBUG] ${message}`);
             }
             
             async checkServerStatus() {
@@ -268,6 +309,7 @@
             
             updateStatus(message) {
                 this.statusText.textContent = message;
+                this.debugLog(message);
             }
             
             async enterVR() {
@@ -280,6 +322,7 @@
                     document.querySelector('.container').style.display = 'none';
                     this.controlsInfo.style.display = 'block';
                     this.roverStatus.style.display = 'block';
+                    this.debugInfo.style.display = 'block';
                     
                     // WebGL setup
                     this.gl = this.canvas.getContext('webgl', { xrCompatible: true });
@@ -291,11 +334,28 @@
                     this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
                     
                     this.xrSession.addEventListener('end', () => this.onSessionEnd());
+                    this.xrSession.addEventListener('inputsourceschange', (event) => this.onInputSourcesChange(event));
                     this.xrSession.requestAnimationFrame((time, frame) => this.onXRFrame(time, frame));
+                    
+                    this.debugLog('VR session started successfully');
                     
                 } catch (error) {
                     this.updateStatus('❌ Failed to enter VR: ' + error.message);
+                    this.debugLog('VR session failed: ' + error.message);
                 }
+            }
+            
+            onInputSourcesChange(event) {
+                event.added.forEach(inputSource => {
+                    this.debugLog(`Controller connected: ${inputSource.handedness} (${inputSource.targetRayMode})`);
+                    if (inputSource.gamepad) {
+                        this.debugLog(`Gamepad detected: ${inputSource.gamepad.buttons.length} buttons, ${inputSource.gamepad.axes.length} axes`);
+                    }
+                });
+                
+                event.removed.forEach(inputSource => {
+                    this.debugLog(`Controller disconnected: ${inputSource.handedness}`);
+                });
             }
             
             onSessionEnd() {
@@ -303,8 +363,11 @@
                 document.querySelector('.container').style.display = 'block';
                 this.controlsInfo.style.display = 'none';
                 this.roverStatus.style.display = 'none';
+                this.debugInfo.style.display = 'none';
                 this.xrSession = null;
+                this.controllerStates.clear();
                 this.sendRoverCommand('STOP');
+                this.debugLog('VR session ended');
             }
             
             onXRFrame(time, frame) {
@@ -322,6 +385,9 @@
                     this.renderScene(pose);
                 }
                 
+                // Update controller count
+                this.controllerCount.textContent = `Controllers: ${session.inputSources.length}`;
+                
                 // Process controllers
                 for (const inputSource of session.inputSources) {
                     this.processController(inputSource);
@@ -334,56 +400,103 @@
                 // Clear with space-like background
                 this.gl.clearColor(0.05, 0.05, 0.15, 1.0);
                 this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
-                
-                // Simple 3D plane rendering would go here
-                // For now, just show the starfield effect
             }
             
             processController(inputSource) {
                 const gamepad = inputSource.gamepad;
-                if (!gamepad || inputSource.handedness !== 'right') return;
+                if (!gamepad) return;
                 
-                // Check for any button press to exit
-                const anyButtonPressed = gamepad.buttons.some(button => button.pressed);
+                const hand = inputSource.handedness;
+                
+                // Initialize controller state if not exists
+                if (!this.controllerStates.has(hand)) {
+                    this.controllerStates.set(hand, {
+                        buttons: [],
+                        axes: []
+                    });
+                    this.debugLog(`Initialized ${hand} controller state`);
+                }
+                
+                const prevState = this.controllerStates.get(hand);
+                
+                // Check for any button press to exit VR
+                const anyButtonPressed = gamepad.buttons.some((button, index) => {
+                    const wasPressed = prevState.buttons[index]?.pressed || false;
+                    const isPressed = button.pressed;
+                    
+                    if (isPressed && !wasPressed) {
+                        this.debugLog(`${hand} button ${index} pressed`);
+                    }
+                    
+                    return isPressed;
+                });
+                
                 if (anyButtonPressed) {
                     this.xrSession.end();
                     return;
                 }
                 
-                // Process right thumbstick (usually axes 2,3)
-                if (gamepad.axes.length >= 4) {
-                    const x = gamepad.axes[2]; // Left/Right
-                    const y = -gamepad.axes[3]; // Forward/Backward (inverted)
+                // Process thumbstick input (focus on right controller)
+                if (hand === 'right' && gamepad.axes.length >= 2) {
+                    // Meta Quest 2 right controller: axes 0,1 are the thumbstick
+                    // Some controllers might use axes 2,3, so let's check both
+                    let x, y;
                     
-                    this.thumbstickValues.textContent = `X: ${x.toFixed(2)}, Y: ${y.toFixed(2)}`;
+                    if (gamepad.axes.length >= 4) {
+                        // Try axes 2,3 first (some controllers)
+                        x = gamepad.axes[2];
+                        y = -gamepad.axes[3]; // Invert Y axis
+                        
+                        // If these axes are near zero, try axes 0,1
+                        if (Math.abs(x) < 0.1 && Math.abs(y) < 0.1) {
+                            x = gamepad.axes[0];
+                            y = -gamepad.axes[1];
+                        }
+                    } else {
+                        // Use axes 0,1
+                        x = gamepad.axes[0];
+                        y = -gamepad.axes[1];
+                    }
+                    
+                    this.thumbstickValues.textContent = `Right Stick - X: ${x.toFixed(2)}, Y: ${y.toFixed(2)}`;
+                    
+                    // Log axis changes for debugging
+                    const prevX = prevState.axes[0] || 0;
+                    const prevY = prevState.axes[1] || 0;
+                    if (Math.abs(x - prevX) > 0.1 || Math.abs(y - prevY) > 0.1) {
+                        this.debugLog(`Right thumbstick: X=${x.toFixed(2)}, Y=${y.toFixed(2)}`);
+                    }
                     
                     // Determine command based on thumbstick position
                     let command = 'STOP';
                     
+                    // Priority: Forward/Backward over turning
                     if (Math.abs(y) > this.commandThreshold) {
-                        if (y > 0) {
-                            command = 'FORWARD';
-                        } else {
-                            command = 'BACKWARD';
-                        }
+                        command = y > 0 ? 'FORWARD' : 'BACKWARD';
                     } else if (Math.abs(x) > this.commandThreshold) {
-                        if (x > 0) {
-                            command = 'TURN_RIGHT';
-                        } else {
-                            command = 'TURN_LEFT';
-                        }
+                        command = x > 0 ? 'TURN_RIGHT' : 'TURN_LEFT';
                     }
                     
                     // Send command if changed
                     if (command !== this.lastCommand) {
                         this.sendRoverCommand(command, { x, y });
                         this.lastCommand = command;
+                        this.debugLog(`Command changed to: ${command}`);
                     }
                 }
+                
+                // Update stored state
+                this.controllerStates.set(hand, {
+                    buttons: gamepad.buttons.map(b => ({ pressed: b.pressed, value: b.value })),
+                    axes: [...gamepad.axes]
+                });
             }
             
             async sendRoverCommand(action, data = {}) {
-                if (!this.serverConnected) return;
+                if (!this.serverConnected) {
+                    this.debugLog('Cannot send command - server disconnected');
+                    return;
+                }
                 
                 try {
                     const response = await fetch('/api/rover/control', {
@@ -396,9 +509,13 @@
                     
                     if (response.ok) {
                         this.currentCommand.textContent = `Command: ${action}`;
+                        this.debugLog(`Command sent: ${action}`);
                         console.log(`🤖 Sent: ${action}`);
+                    } else {
+                        this.debugLog(`Command failed: ${response.status}`);
                     }
                 } catch (error) {
+                    this.debugLog(`Command error: ${error.message}`);
                     console.error('Failed to send command:', error);
                 }
             }
