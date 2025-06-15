@@ -1,68 +1,15 @@
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
-const path = require('path');
+const path =path.join(__dirname, 'public');
 const axios = require('axios');
-const mqtt = require('mqtt');
+const mqtt = require('mqtt'); // Import MQTT
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(express.static(path.join(__dirname, 'public')));
-
-// --- MQTT Configuration ---
-// IMPORTANT: Replace with your actual HiveMQ (or other broker) credentials
-const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtts://d20951d2e2aa49e98e82561d859007d3.s1.eu.hivemq.cloud:8883'; // e.g., mqtts://xxxxxxxx.s2.eu.hivemq.cloud:8883
-const MQTT_USERNAME = process.env.MQTT_USERNAME || 'lunar';
-const MQTT_PASSWORD = process.env.MQTT_PASSWORD || 'Rover123';
-const ROVER_CONTROL_TOPIC = 'rover/control';
-
-let mqttClient = null;
-
-const mqttOptions = {
-  username: MQTT_USERNAME,
-  password: MQTT_PASSWORD,
-  clientId: `render_server_${Math.random().toString(16).substr(2, 8)}`, // Unique client ID
-  reconnectPeriod: 5000, // Try reconnecting every 5 seconds
-};
-
-function connectMqtt() {
-    if (!MQTT_BROKER_URL.includes('YOUR_HIVEMQ_CLUSTER_URL')) { // Basic check if placeholders are replaced
-        console.log('MQTT: Attempting to connect to broker:', MQTT_BROKER_URL);
-        mqttClient = mqtt.connect(MQTT_BROKER_URL, mqttOptions);
-
-        mqttClient.on('connect', () => {
-            console.log('MQTT: Connected to broker successfully.');
-        });
-
-        mqttClient.on('error', (err) => {
-            console.error('MQTT: Connection error:', err.message);
-            // The client will attempt to reconnect automatically due to reconnectPeriod
-        });
-
-        mqttClient.on('reconnect', () => {
-            console.log('MQTT: Reconnecting to broker...');
-        });
-
-        mqttClient.on('close', () => {
-            console.log('MQTT: Disconnected from broker.');
-        });
-
-        mqttClient.on('offline', () => {
-            console.log('MQTT: Client is offline.');
-        });
-
-    } else {
-        console.warn('MQTT: Broker URL seems to be a placeholder. MQTT connection not attempted.');
-        console.warn('MQTT: Please set MQTT_BROKER_URL, MQTT_USERNAME, and MQTT_PASSWORD environment variables or update server.js');
-    }
-}
-
-connectMqtt(); // Initialize MQTT connection
-
-// --- End MQTT Configuration ---
-
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -72,6 +19,52 @@ let ipWebcamUrl = null;
 let questViewers = new Set();
 let mobileConfigurator = null;
 let connectedClientsToProxy = 0;
+
+// --- MQTT Configuration ---
+// IMPORTANT: Replace with your actual HiveMQ Cloud details
+const MQTT_BROKER_URL = 'mqtts://d20951d2e2aa49e98e82561d859007d3.s1.eu.hivemq.cloud:8883'; // e.g., mqtts://abcdef123.s1.eu.hivemq.cloud:8883
+const MQTT_OPTIONS = {
+  username: 'lunar', // Your HiveMQ username
+  password: 'Rover123', // Your HiveMQ password
+  clientId: 'render_server_' + Math.random().toString(16).substring(2, 10), // Unique client ID
+  connectTimeout: 4000, // Time to wait for a CONNACK
+  reconnectPeriod: 1000, // Milliseconds to wait before resubscribing
+};
+const MQTT_ROVER_CONTROL_TOPIC = 'quest/rover/control';
+let mqttClient;
+
+function connectMqtt() {
+    if (MQTT_BROKER_URL.includes('YOUR_CLUSTER_URL')) {
+        console.warn('MQTT: Broker URL is not configured. MQTT will not connect.');
+        return;
+    }
+    console.log(`MQTT: Attempting to connect to broker: ${MQTT_BROKER_URL}`);
+    mqttClient = mqtt.connect(MQTT_BROKER_URL, MQTT_OPTIONS);
+
+    mqttClient.on('connect', () => {
+        console.log('MQTT: Successfully connected to broker.');
+    });
+
+    mqttClient.on('error', (err) => {
+        console.error('MQTT: Connection error:', err.message);
+    });
+
+    mqttClient.on('reconnect', () => {
+        console.log('MQTT: Reconnecting to broker...');
+    });
+
+    mqttClient.on('close', () => {
+        console.log('MQTT: Connection to broker closed.');
+    });
+
+    mqttClient.on('offline', () => {
+        console.log('MQTT: Client is offline.');
+    });
+}
+// Attempt to connect to MQTT broker on server start
+connectMqtt();
+// --- End MQTT Configuration ---
+
 
 app.get('/proxied-stream', async (req, res) => {
     if (!ipWebcamUrl) {
@@ -144,7 +137,7 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON format' }));
             return;
         }
-        console.log(`WebSocket: Received type '${data.type}' from ${ws.role || 'unknown'}`);
+        // console.log(`WebSocket: Received from ${ws.role || 'unknown'}:`, data.type); // Less verbose logging
 
         switch (data.type) {
             case 'register_mobile_configurator':
@@ -193,39 +186,35 @@ wss.on('connection', (ws) => {
                     }
                 }
                 break;
-
-            case 'controller_input': // Raw controller data from Quest for display
-                if (ws.role !== 'quest_viewer') {
-                    console.log("WebSocket: Controller input from non-Quest client, ignoring.");
-                } else {
-                    // Echo raw controller input back to the specific Quest viewer client that sent it
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify(data)); // data already contains { type: 'controller_input', input: controllerData }
+            
+            case 'rover_stick_input': // New message type from Quest client
+                if (ws.role === 'quest_viewer') {
+                    // console.log('WebSocket: Received rover_stick_input:', data.input); // Can be very verbose
+                    if (mqttClient && mqttClient.connected) {
+                        const payload = JSON.stringify(data.input); // data.input should be { pressed, x, y }
+                        mqttClient.publish(MQTT_ROVER_CONTROL_TOPIC, payload, { qos: 0, retain: false }, (err) => {
+                            if (err) {
+                                console.error('MQTT: Failed to publish message:', err);
+                            }
+                            // else { console.log(`MQTT: Published to ${MQTT_ROVER_CONTROL_TOPIC}`); } // Verbose
+                        });
+                    } else {
+                        console.warn('MQTT: Client not connected or not configured, cannot send rover input.');
                     }
+                } else {
+                    console.log("WebSocket: Rover input from non-Quest client, ignoring.");
                 }
                 break;
 
-            case 'rover_command': // Command for the ESP8266 rover
-                if (ws.role === 'quest_viewer' && data.command) {
-                    console.log(`WebSocket: Received rover_command: '${data.command}' from Quest viewer.`);
-                    if (mqttClient && mqttClient.connected) {
-                        const payload = JSON.stringify({ command: data.command, timestamp: Date.now() });
-                        mqttClient.publish(ROVER_CONTROL_TOPIC, payload, (err) => {
-                            if (err) {
-                                console.error(`MQTT: Failed to publish to ${ROVER_CONTROL_TOPIC}:`, err);
-                            } else {
-                                console.log(`MQTT: Published to ${ROVER_CONTROL_TOPIC}: ${payload}`);
-                            }
-                        });
-                    } else {
-                        console.warn('MQTT: Client not connected or not initialized. Cannot send rover command.');
-                         if (!MQTT_BROKER_URL.includes('YOUR_HIVEMQ_CLUSTER_URL')) {
-                            console.warn('MQTT: Attempting to reconnect...');
-                            if (mqttClient && typeof mqttClient.reconnect === 'function') mqttClient.reconnect(); else connectMqtt();
-                         }
-                    }
+            case 'controller_input': // This is the generic one, Quest client will decide if it sends this additionally.
+                if (ws.role !== 'quest_viewer') {
+                    console.log("WebSocket: Controller input from non-Quest client, ignoring.");
                 } else {
-                    console.log("WebSocket: Invalid rover_command or not from Quest viewer. Data:", data);
+                     // This is general controller data, primarily for display on the Quest page itself.
+                     // The Quest client could echo this back to itself, or server can do it.
+                     // For simplicity, if Quest sends it, server just acknowledges or ignores.
+                     // For now, let's assume if it's sent, it's for some other purpose or debugging.
+                    // console.log("WebSocket: Received general controller_input (for display/debug):", data.input);
                 }
                 break;
 
@@ -249,18 +238,16 @@ wss.on('connection', (ws) => {
     ws.onerror = (error) => {
         console.error(`WebSocket error (Role: ${ws.role || 'unknown'}):`, error.message);
     };
-
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     console.log(`Access application at: http://localhost:${PORT}/ (or your Render URL)`);
-    if (MQTT_BROKER_URL.includes('YOUR_HIVEMQ_CLUSTER_URL')) {
-        console.warn('---------------------------------------------------------------------------');
-        console.warn('WARNING: MQTT Broker credentials are using placeholders in server.js!');
-        console.warn('Rover control via MQTT will NOT work until you configure them.');
-        console.warn('Set environment variables or update MQTT_BROKER_URL, MQTT_USERNAME, MQTT_PASSWORD in server.js.');
-        console.warn('---------------------------------------------------------------------------');
+    if (MQTT_BROKER_URL.includes('YOUR_CLUSTER_URL')) {
+        console.warn("*********************************************************************");
+        console.warn("WARNING: MQTT Broker is not configured in server.js.");
+        console.warn("Rover control via MQTT will not function until you update MQTT_BROKER_URL, MQTT_OPTIONS.username, and MQTT_OPTIONS.password.");
+        console.warn("*********************************************************************");
     }
 });
