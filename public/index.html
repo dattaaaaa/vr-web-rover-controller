@@ -219,27 +219,17 @@
             }
             
             async checkServerStatus() {
-              try {
-                const response = await fetch('/api/status');
-                if (!response.ok) throw new Error('Server error');
-                
-                const data = await response.json();
-                this.serverConnected = data.status === 'online';
-                this.updateConnectionStatus(data.mqtt);
-                
-                // Add this to debug MQTT connection
-                if (data.mqtt) {
-                  console.log('✅ MQTT Connected');
-                } else {
-                  console.warn('⚠️ MQTT Disconnected');
+                try {
+                    const response = await fetch('/api/status');
+                    const data = await response.json();
+                    this.serverConnected = data.status === 'online';
+                    this.updateConnectionStatus(data.mqtt);
+                } catch (error) {
+                    this.serverConnected = false;
+                    this.updateConnectionStatus(false);
                 }
-              } catch (error) {
-                this.serverConnected = false;
-                this.updateConnectionStatus(false);
-                console.error('❌ Server connection failed:', error);
-              }
-              
-              setTimeout(() => this.checkServerStatus(), 3000);
+                
+                setTimeout(() => this.checkServerStatus(), 5000);
             }
             
             updateConnectionStatus(mqttConnected) {
@@ -299,15 +289,6 @@
                     this.xrSession.updateRenderState({ baseLayer: layer });
                     
                     this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
-
-                    this.xrSession.addEventListener('inputsourceschange', 
-                    (event) => this.onInputSourcesChange(event));
-    
-// Implement handler:
-onInputSourcesChange(event) {
-    console.log('Input sources changed:', event);
-    // Add controller connection/disconnection logic here
-}
                     
                     this.xrSession.addEventListener('end', () => this.onSessionEnd());
                     this.xrSession.requestAnimationFrame((time, frame) => this.onXRFrame(time, frame));
@@ -329,7 +310,7 @@ onInputSourcesChange(event) {
             onXRFrame(time, frame) {
                 if (!this.xrSession) return;
                 
-                const session = this.xrSession;
+                const session = frame.session;
                 const pose = frame.getViewerPose(this.xrRefSpace);
                 
                 if (pose) {
@@ -371,8 +352,8 @@ onInputSourcesChange(event) {
                 
                 // Process right thumbstick (usually axes 2,3)
                 if (gamepad.axes.length >= 4) {
-                    const x = gamepad.axes[0]; // Left/Right
-                    const y = -gamepad.axes[1]; // Forward/Backward (inverted)
+                    const x = gamepad.axes[2]; // Left/Right
+                    const y = -gamepad.axes[3]; // Forward/Backward (inverted)
                     
                     this.thumbstickValues.textContent = `X: ${x.toFixed(2)}, Y: ${y.toFixed(2)}`;
                     
