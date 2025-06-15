@@ -289,6 +289,15 @@
                     this.xrSession.updateRenderState({ baseLayer: layer });
                     
                     this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
+
+                    this.xrSession.addEventListener('inputsourceschange', 
+                    (event) => this.onInputSourcesChange(event));
+    
+// Implement handler:
+onInputSourcesChange(event) {
+    console.log('Input sources changed:', event);
+    // Add controller connection/disconnection logic here
+}
                     
                     this.xrSession.addEventListener('end', () => this.onSessionEnd());
                     this.xrSession.requestAnimationFrame((time, frame) => this.onXRFrame(time, frame));
@@ -310,7 +319,7 @@
             onXRFrame(time, frame) {
                 if (!this.xrSession) return;
                 
-                const session = frame.session;
+                const session = this.xrSession;
                 const pose = frame.getViewerPose(this.xrRefSpace);
                 
                 if (pose) {
@@ -352,8 +361,8 @@
                 
                 // Process right thumbstick (usually axes 2,3)
                 if (gamepad.axes.length >= 4) {
-                    const x = gamepad.axes[2]; // Left/Right
-                    const y = -gamepad.axes[3]; // Forward/Backward (inverted)
+                    const x = gamepad.axes[0]; // Left/Right
+                    const y = -gamepad.axes[1]; // Forward/Backward (inverted)
                     
                     this.thumbstickValues.textContent = `X: ${x.toFixed(2)}, Y: ${y.toFixed(2)}`;
                     
