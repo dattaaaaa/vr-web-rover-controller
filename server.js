@@ -2,7 +2,6 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
-const path =path.join(__dirname, 'public');
 const axios = require('axios');
 const mqtt = require('mqtt'); // Import MQTT
 
