@@ -1,7 +1,7 @@
 {
   "name": "render-quest-stream",
   "version": "1.0.0",
-  "description": "Stream mobile camera to Quest 2 and show controller input.",
+  "description": "Stream mobile camera to Quest 2 and show controller input with MQTT.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -10,7 +10,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "ws": "^8.13.0",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "mqtt": "^5.3.0"  // Or latest version, e.g. ^4.3.7 if v5 has issues
   },
   "engines": {
     "node": ">=18.0.0"
