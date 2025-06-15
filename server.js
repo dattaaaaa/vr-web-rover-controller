@@ -98,6 +98,11 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  next();
+});
+
 // Routes
 app.get('/', (req, res) => {
   console.log('📄 Serving index.html');
@@ -109,7 +114,10 @@ app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
     mqtt: mqttConnected,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    rover: {
+      lastStatus: Date.now() - (Math.floor(Math.random() * 10000) // Simulated freshness
+    }
   });
 });
 
