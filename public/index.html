@@ -112,13 +112,16 @@
             position: fixed;
             bottom: 20px;
             left: 20px;
-            background: rgba(0,0,0,0.8);
+            background: rgba(0,0,0,0.9);
             padding: 15px;
             border-radius: 10px;
             font-size: 12px;
             z-index: 1001;
             display: none;
-            max-width: 300px;
+            max-width: 400px;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 2px solid #4ecdc4;
         }
         
         .connection-status {
@@ -175,7 +178,13 @@
             <div id="connection-status" class="connection-status disconnected">
                 Server: Checking...
             </div>
+            <p style="font-size: 14px; margin: 10px 0; opacity: 0.8;">
+                📱 Quest Users: Open in <strong>Quest Browser</strong> with <strong>HTTPS</strong>
+            </p>
             <button id="enter-vr-btn" class="enter-vr-btn" disabled>🚀 Enter VR Mode</button>
+            <button id="debug-toggle-btn" class="enter-vr-btn" style="background: linear-gradient(45deg, #4ecdc4, #44a08d); font-size: 16px; padding: 10px 20px;">
+                🔍 Show Debug
+            </button>
         </div>
     </div>
     
@@ -218,6 +227,7 @@
                 this.thumbstickValues = document.getElementById('thumbstick-values');
                 this.controllerCount = document.getElementById('controller-count');
                 this.debugLog = document.getElementById('debug-log');
+                this.debugToggleBtn = document.getElementById('debug-toggle-btn');
                 
                 this.lastCommand = null;
                 this.commandThreshold = 0.3;
@@ -228,6 +238,15 @@
                 this.init();
                 this.createParticles();
                 this.checkServerStatus();
+                this.setupDebugToggle();
+            }
+            
+            setupDebugToggle() {
+                this.debugToggleBtn.addEventListener('click', () => {
+                    const isVisible = this.debugInfo.style.display !== 'none';
+                    this.debugInfo.style.display = isVisible ? 'none' : 'block';
+                    this.debugToggleBtn.textContent = isVisible ? '🔍 Show Debug' : '❌ Hide Debug';
+                });
             }
             
             createParticles() {
@@ -288,22 +307,57 @@
             }
             
             async init() {
-                if (!navigator.xr) {
-                    this.updateStatus('❌ WebXR not supported');
+                this.debugLog('Starting VR initialization...');
+                
+                // Check if we're on HTTPS
+                if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+                    this.updateStatus('❌ HTTPS Required for VR on Quest');
+                    this.debugLog('ERROR: HTTPS required for WebXR on Quest devices');
                     return;
                 }
                 
+                // Check WebXR support
+                if (!navigator.xr) {
+                    this.updateStatus('❌ WebXR not supported in this browser');
+                    this.debugLog('ERROR: navigator.xr not available');
+                    this.debugLog('User Agent: ' + navigator.userAgent);
+                    return;
+                }
+                
+                this.debugLog('WebXR API detected');
+                this.debugLog('User Agent: ' + navigator.userAgent);
+                this.debugLog('Protocol: ' + location.protocol);
+                this.debugLog('Hostname: ' + location.hostname);
+                
                 try {
-                    const isSupported = await navigator.xr.isSessionSupported('immersive-vr');
-                    if (isSupported) {
-                        this.updateStatus('✅ VR Ready! Put on your headset');
+                    this.updateStatus('🔍 Checking VR support...');
+                    
+                    // Check immersive-vr support
+                    const isVRSupported = await navigator.xr.isSessionSupported('immersive-vr');
+                    this.debugLog('Immersive VR supported: ' + isVRSupported);
+                    
+                    if (isVRSupported) {
+                        this.updateStatus('✅ VR Ready! Put on your headset and click Enter VR');
                         this.enterVRBtn.disabled = false;
-                        this.enterVRBtn.addEventListener('click', () => this.enterVR());
+                        this.enterVRBtn.addEventListener('click', () => {
+                            this.debugLog('Enter VR button clicked');
+                            this.enterVR();
+                        });
+                        this.debugLog('Enter VR button enabled');
                     } else {
-                        this.updateStatus('❌ VR not supported on this device');
+                        // Try to get more specific error info
+                        try {
+                            await navigator.xr.requestSession('immersive-vr');
+                        } catch (detailError) {
+                            this.debugLog('Detailed error: ' + detailError.message);
+                            this.updateStatus('❌ VR Error: ' + detailError.message);
+                        }
                     }
                 } catch (error) {
-                    this.updateStatus('❌ Error: ' + error.message);
+                    this.updateStatus('❌ VR Check Error: ' + error.message);
+                    this.debugLog('VR support check failed: ' + error.message);
+                    this.debugLog('Error name: ' + error.name);
+                    this.debugLog('Error stack: ' + error.stack);
                 }
             }
             
@@ -313,35 +367,84 @@
             }
             
             async enterVR() {
+                this.debugLog('enterVR() called');
+                this.updateStatus('🚀 Requesting VR session...');
+                
                 try {
+                    this.debugLog('Calling navigator.xr.requestSession...');
+                    
                     this.xrSession = await navigator.xr.requestSession('immersive-vr', {
                         requiredFeatures: ['local']
                     });
                     
-                    this.updateStatus('🎮 VR Mode Active');
+                    this.debugLog('VR session obtained successfully');
+                    this.updateStatus('🎮 VR Mode Active - Setting up...');
+                    
+                    // Hide main UI, show VR UI
                     document.querySelector('.container').style.display = 'none';
                     this.controlsInfo.style.display = 'block';
                     this.roverStatus.style.display = 'block';
                     this.debugInfo.style.display = 'block';
                     
+                    this.debugLog('UI updated for VR mode');
+                    
                     // WebGL setup
+                    this.debugLog('Setting up WebGL context...');
                     this.gl = this.canvas.getContext('webgl', { xrCompatible: true });
+                    
+                    if (!this.gl) {
+                        throw new Error('Failed to get WebGL context');
+                    }
+                    
                     await this.gl.makeXRCompatible();
+                    this.debugLog('WebGL context made XR compatible');
                     
                     const layer = new XRWebGLLayer(this.xrSession, this.gl);
                     this.xrSession.updateRenderState({ baseLayer: layer });
+                    this.debugLog('XR render state updated');
                     
                     this.xrRefSpace = await this.xrSession.requestReferenceSpace('local');
+                    this.debugLog('Reference space obtained');
                     
-                    this.xrSession.addEventListener('end', () => this.onSessionEnd());
-                    this.xrSession.addEventListener('inputsourceschange', (event) => this.onInputSourcesChange(event));
+                    // Set up event listeners
+                    this.xrSession.addEventListener('end', () => {
+                        this.debugLog('XR session ended event fired');
+                        this.onSessionEnd();
+                    });
+                    
+                    this.xrSession.addEventListener('inputsourceschange', (event) => {
+                        this.debugLog('Input sources changed event fired');
+                        this.onInputSourcesChange(event);
+                    });
+                    
+                    // Start render loop
+                    this.debugLog('Starting render loop...');
                     this.xrSession.requestAnimationFrame((time, frame) => this.onXRFrame(time, frame));
                     
-                    this.debugLog('VR session started successfully');
+                    this.updateStatus('🎮 VR Mode Active - Ready!');
+                    this.debugLog('VR session fully initialized');
                     
                 } catch (error) {
-                    this.updateStatus('❌ Failed to enter VR: ' + error.message);
-                    this.debugLog('VR session failed: ' + error.message);
+                    this.debugLog('VR session failed with error: ' + error.message);
+                    this.debugLog('Error name: ' + error.name);
+                    this.debugLog('Error stack: ' + error.stack);
+                    
+                    this.updateStatus('❌ VR Failed: ' + error.message);
+                    
+                    // Show main UI again
+                    document.querySelector('.container').style.display = 'block';
+                    this.controlsInfo.style.display = 'none';
+                    this.roverStatus.style.display = 'none';
+                    this.debugInfo.style.display = 'none';
+                    
+                    // Specific error handling
+                    if (error.name === 'NotAllowedError') {
+                        this.debugLog('Permission denied - user may have cancelled or VR not available');
+                    } else if (error.name === 'NotSupportedError') {
+                        this.debugLog('VR not supported on this device');
+                    } else if (error.name === 'InvalidStateError') {
+                        this.debugLog('Invalid state - VR may be in use by another app');
+                    }
                 }
             }
             
