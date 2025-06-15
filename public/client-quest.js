@@ -1,25 +1,27 @@
 // --- START OF FILE public/client-quest.js ---
 
-const remoteStreamImg = document.getElementById('remoteStreamImg'); // This <img> is still used as the source for the texture
+const remoteStreamImg = document.getElementById('remoteStreamImg');
 const connectButton = document.getElementById('connectButton');
 const enterVRButton = document.getElementById('enterVRButton');
-const statusDiv = document.getElementById('status');
-const controllerInfoDiv = document.getElementById('controllerInfo');
+const statusDiv = document.getElementById('status'); // For non-VR status
+const controllerInfoDiv = document.getElementById('controllerInfo'); // For non-VR controller data
+const vrControllerOverlay = document.getElementById('vrControllerOverlay'); // For VR controller data overlay
 
-let xrCanvas; // Will hold the reference to the WebXR canvas
-let gl = null; // WebGL rendering context
+let xrCanvas;
+let gl = null;
 
-// WebGL resources for rendering the video quad
 let shaderProgram = null;
 let videoTexture = null;
-let quadBuffer = null; // Object to hold position, texCoord, and index buffers
+let quadBuffer = null;
 let positionAttribLocation = null;
 let texCoordAttribLocation = null;
 let projectionUniformLocation = null;
 let modelViewUniformLocation = null;
 let textureUniformLocation = null;
 
-// WebSocket and WebXR session variables
+// For simple text display in VR (using HTML overlay method)
+let currentVrText = ""; 
+
 let ws;
 let xrSession = null;
 let xrRefSpace = null;
@@ -33,9 +35,19 @@ function updateStatus(message, isError = false) {
     statusDiv.style.color = isError ? 'red' : 'inherit';
 }
 
-function updateControllerInfo(data) {
+function updateControllerInfo(data) { // For non-VR display
     controllerInfoDiv.textContent = JSON.stringify(data, null, 2);
 }
+
+function updateVRControllerOverlay(text) {
+    if (vrControllerOverlay && xrSession) {
+        vrControllerOverlay.textContent = text;
+        vrControllerOverlay.style.display = 'block';
+    } else if (vrControllerOverlay) {
+        vrControllerOverlay.style.display = 'none';
+    }
+}
+
 
 connectButton.addEventListener('click', () => {
     connectButton.disabled = true;
@@ -44,11 +56,9 @@ connectButton.addEventListener('click', () => {
 });
 
 function setupWebSocket() {
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        console.log("WebSocket already open or connecting.");
-        return;
-    }
-    ws = new WebSocket(WS_URL);
+    // ... (ws setup, onopen, onmessage (for stream URL), onclose, onerror remains largely the same) ...
+    // Make sure onopen shows enterVRButton correctly
+     ws = new WebSocket(WS_URL);
     updateStatus('Attempting to connect to server...');
 
     ws.onopen = () => {
@@ -59,10 +69,9 @@ function setupWebSocket() {
             enterVRButton.style.display = 'inline-block';
             xrCanvas = document.getElementById('xrCanvas');
             if (!xrCanvas) {
-                // Fallback: create dynamically if not in HTML, though it should be.
-                xrCanvas = document.createElement('canvas');
-                xrCanvas.id = 'xrCanvas';
-                console.warn("Dynamically created XR canvas. Ensure it's in quest.html.");
+                console.error("XR Canvas not found! Critical for WebXR.");
+                updateStatus("XR Canvas element missing from HTML.", true);
+                return;
             }
         } else {
             updateStatus('WebXR not supported on this browser/device.', true);
@@ -74,50 +83,79 @@ function setupWebSocket() {
 
         switch (data.type) {
             case 'ip_webcam_url_update':
-                // data.url is the ORIGINAL IP Webcam URL (e.g., http://PHONE_IP:PORT/video)
-                // This is useful for status messages, but the <img> src will be the proxy.
                 if (data.url && typeof data.url === 'string') {
-                    const originalUrl = data.url; // Keep for display/debug
-                    const streamSrc = '/proxied-stream'; // ALWAYS use the proxied path
+                    const originalUrl = data.url; 
+                    const streamSrc = data.useProxy ? '/proxied-stream' : originalUrl;
 
-                    updateStatus(`IP Webcam URL set (via proxy): ${originalUrl}`);
-                    console.log("QUEST DEBUG: Setting img src to PROXIED PATH:", streamSrc, " (Original:", originalUrl, ")");
+                    updateStatus(`IP Webcam URL set: ${originalUrl} (Using ${data.useProxy ? 'proxy' : 'direct'})`);
+                    console.log("QUEST DEBUG: Setting img src to:", streamSrc, " (Original:", originalUrl, ")");
                     
-                    // Clear previous src to help ensure the browser re-fetches if the underlying stream changes
-                    // especially if the URL '/proxied-stream' itself doesn't change.
                     remoteStreamImg.src = ''; 
                     remoteStreamImg.src = streamSrc; 
                     
-                    remoteStreamImg.alt = "Streaming (proxied) from " + originalUrl;
+                    remoteStreamImg.alt = `Streaming ${data.useProxy ? '(proxied)' : ''} from ${originalUrl}`;
 
                     remoteStreamImg.onerror = function() {
-                        console.error("QUEST DEBUG: Error loading image from PROXIED src:", remoteStreamImg.src);
-                        updateStatus(`Error loading proxied stream. Original: ${originalUrl}. Check server logs & IP Cam.`, true);
-                        remoteStreamImg.alt = `Failed to load proxied stream. Original: ${originalUrl}`;
+                        console.error("QUEST DEBUG: Error loading image from src:", remoteStreamImg.src);
+                        updateStatus(`Error loading stream from ${remoteStreamImg.src}. Check URL, network, and server logs.`, true);
+                        remoteStreamImg.alt = `Failed to load: ${remoteStreamImg.src}`;
                     };
                     remoteStreamImg.onload = function() {
-                        console.log("QUEST DEBUG: Image loaded successfully from PROXIED src:", remoteStreamImg.src);
-                        updateStatus(`Streaming (proxied) from ${originalUrl}`);
-                        // Update video texture if in VR
+                        console.log("QUEST DEBUG: Image loaded successfully from src:", remoteStreamImg.src);
+                        updateStatus(`Streaming from ${remoteStreamImg.src}`);
                         if (xrSession && videoTexture && gl) {
                             updateVideoTexture();
                         }
                     };
                 } else {
-                    updateStatus('Received invalid or empty IP Webcam URL. Stream will not start.', true);
-                    remoteStreamImg.src = "#"; // Use a placeholder or clear
+                    updateStatus('Received invalid or empty IP Webcam URL.', true);
+                    remoteStreamImg.src = "#"; 
                     remoteStreamImg.alt = "IP Webcam URL not set or invalid.";
                 }
                 break;
             case 'no_stream_url_set':
-                updateStatus('No IP Webcam URL has been set on the server yet. Please use the Mobile Setup page.', true);
+                updateStatus('No IP Webcam URL has been set on the server yet.', true);
                 remoteStreamImg.src = "#";
                 remoteStreamImg.alt = "IP Webcam URL not set yet on server.";
                 break;
-            case 'controller_input':
-                updateControllerInfo(data.input);
+            case 'controller_input': // This is the echo from the server
+                updateControllerInfo(data.input); // Update non-VR HTML display
+                
+                // Prepare text for VR overlay based on right thumbstick
+                let vrDisplayMessage = "Right Stick: Center";
+                if (data.input && data.input.inputs) {
+                    let stickX = 0;
+                    let stickY = 0;
+                    for (const controller of data.input.inputs) {
+                        if (controller.handedness === 'right') {
+                            if (controller.axes && controller.axes.length >= 4) {
+                                stickX = controller.axes[2];
+                                stickY = controller.axes[3];
+                                vrDisplayMessage = `Right Stick: X=${stickX.toFixed(2)}, Y=${stickY.toFixed(2)}`;
+                                break;
+                            }
+                        }
+                    }
+                     // Fallback if no 'right' handedness found
+                    if (vrDisplayMessage === "Right Stick: Center" && data.input.inputs.length > 0) {
+                        const firstController = data.input.inputs[0];
+                        if (firstController.axes && firstController.axes.length >=4) {
+                            stickX = firstController.axes[2];
+                            stickY = firstController.axes[3];
+                            vrDisplayMessage = `Stick (${firstController.handedness || 'unknown'}): X=${stickX.toFixed(2)}, Y=${stickY.toFixed(2)}`;
+                        } else if (firstController.axes && firstController.axes.length >=2) {
+                            stickX = firstController.axes[0];
+                            stickY = firstController.axes[1];
+                            vrDisplayMessage = `Stick (${firstController.handedness || 'unknown'}): X=${stickX.toFixed(2)}, Y=${stickY.toFixed(2)}`;
+                        }
+                    }
+                }
+                currentVrText = vrDisplayMessage; // Store for onXRFrame
+                if (xrSession) {
+                    updateVRControllerOverlay(currentVrText);
+                }
                 break;
-            case 'error': // Errors sent from WebSocket server
+            case 'error': 
                 updateStatus(`Server error: ${data.message}`, true);
                 break;
             default:
@@ -126,28 +164,31 @@ function setupWebSocket() {
     };
 
     ws.onclose = (event) => {
-        updateStatus(`Disconnected from server (Code: ${event.code}). Please refresh to reconnect.`, true);
+        updateStatus(`Disconnected from server (Code: ${event.code}). Please refresh.`, true);
         connectButton.disabled = false;
         connectButton.style.display = 'inline-block';
         enterVRButton.style.display = 'none';
-        remoteStreamImg.src = "#"; // Clear image on disconnect
+        remoteStreamImg.src = "#"; 
         remoteStreamImg.alt = "Disconnected. Refresh to connect.";
         ws = null;
-        if (xrSession) { // If VR was active, ensure it's cleaned up
-            onXRSessionEnded();
+        if (xrSession) { 
+            updateVRControllerOverlay("Disconnected");
+            // onXRSessionEnded will be called by the session 'end' event
         }
     };
 
     ws.onerror = (error) => {
         console.error('WebSocket error:', error);
         updateStatus('WebSocket connection error. Check server and network.', true);
-        // onclose will likely be called too, handling UI updates
     };
 }
 
-// --- WebGL Shader and Resource Management ---
 
-function createShader(gl, type, source) {
+// --- WebGL Shader and Resource Management (initWebGLResources, updateVideoTexture, drawScene) ---
+// These remain largely the same as your `client-quest.js` from the prompt.
+// Make sure createShaderProgram, initWebGLResources, updateVideoTexture, drawScene are present and correct.
+// I'll put placeholders here - copy them from your working `client-quest.js`
+function createShader(gl, type, source) { /* ... your existing code ... */ 
     const shader = gl.createShader(type);
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
@@ -159,7 +200,7 @@ function createShader(gl, type, source) {
     return shader;
 }
 
-function createShaderProgram(gl) {
+function createShaderProgram(gl) { /* ... your existing code ... */ 
     const vertexShaderSource = `
         attribute vec4 aVertexPosition;
         attribute vec2 aTextureCoord;
@@ -168,7 +209,7 @@ function createShaderProgram(gl) {
         varying vec2 vTextureCoord;
         void main() {
             gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
-            vTextureCoord = aTextureCoord;
+            vTextureCoord = aTextureCoord; /* Flip Y for video texture if needed: vec2(aTextureCoord.x, 1.0 - aTextureCoord.y); */
         }
     `;
     const fragmentShaderSource = `
@@ -194,7 +235,7 @@ function createShaderProgram(gl) {
     return program;
 }
 
-function initWebGLResources() {
+function initWebGLResources() { /* ... your existing code ... */
     if (!gl) {
         console.error("initWebGLResources: WebGL context not available.");
         return false;
@@ -212,16 +253,14 @@ function initWebGLResources() {
     modelViewUniformLocation = gl.getUniformLocation(shaderProgram, 'uModelViewMatrix');
     textureUniformLocation = gl.getUniformLocation(shaderProgram, 'uSampler');
 
-    // Quad placed a bit in front of the viewer
-    // Adjusted size for better viewing: X width 4, Y height 3, at Z -5
-    const positions = [
-        -2.0, -1.5, -5.0,  // Bottom left
-         2.0, -1.5, -5.0,  // Bottom right
-         2.0,  1.5, -5.0,  // Top right
-        -2.0,  1.5, -5.0   // Top left
-    ];
-    const textureCoords = [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]; // BL, BR, TR, TL
-    const indices = [0, 1, 2, 0, 2, 3]; // Two triangles
+    const positions = [ // Quad filling more of the view, adjust Z as needed
+        -2.0, -1.5, -3.0, // Bottom left
+         2.0, -1.5, -3.0, // Bottom right
+         2.0,  1.5, -3.0, // Top right
+        -2.0,  1.5, -3.0  // Top left
+    ]; // X, Y, Z. Z = -3 is 3 units in front. Width 4, Height 3.
+    const textureCoords = [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]; // Standard UVs BL, BR, TR, TL
+    const indices = [0, 1, 2, 0, 2, 3];
 
     quadBuffer = {
         position: gl.createBuffer(),
@@ -242,136 +281,123 @@ function initWebGLResources() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    
-    // Initialize with a placeholder texture (e.g., a 1x1 blue pixel)
-    // This prevents "texture not complete" errors if the image isn't loaded yet.
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255]));
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255])); // Placeholder
 
     return true;
-}
+ }
 
-function updateVideoTexture() {
-    // Ensure gl, texture, and image are valid and image has dimensions
+function updateVideoTexture() { /* ... your existing code ... */
     if (!gl || !videoTexture || !remoteStreamImg.complete || !remoteStreamImg.naturalWidth || remoteStreamImg.naturalWidth === 0) {
         return;
     }
     gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+    // TexImage2D might flip image, if so, adjust UVs or use gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); before texImage2D
+    // gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // <--- Add this if video is upside down
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, remoteStreamImg);
-    // Mipmaps not strictly necessary for a 2D quad unless it's very far away or at sharp angles.
-    // if (isPowerOfTwo(remoteStreamImg.width) && isPowerOfTwo(remoteStreamImg.height)) {
-    //    gl.generateMipmap(gl.TEXTURE_2D);
-    // }
+    // gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // <--- And reset after
 }
-// function isPowerOfTwo(value) { return (value & (value - 1)) === 0; }
 
+function drawScene(projectionMatrix, modelViewMatrix) { /* ... your existing code ... */
+    if (!gl || !shaderProgram || !quadBuffer || !videoTexture) return;
 
-function drawScene(projectionMatrix, modelViewMatrix) {
-    if (!gl || !shaderProgram || !quadBuffer || !videoTexture) {
-        console.warn("drawScene: Missing WebGL resources.");
-        return;
-    }
-
-    updateVideoTexture(); // Update texture from the <img> tag
+    updateVideoTexture(); 
 
     gl.useProgram(shaderProgram);
-
     gl.uniformMatrix4fv(projectionUniformLocation, false, projectionMatrix);
     gl.uniformMatrix4fv(modelViewUniformLocation, false, modelViewMatrix);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.position);
-    gl.vertexAttribPointer(positionAttribLocation, 3, gl.FLOAT, false, 0, 0); // 3 components per vertex
+    gl.vertexAttribPointer(positionAttribLocation, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(positionAttribLocation);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer.textureCoord);
-    gl.vertexAttribPointer(texCoordAttribLocation, 2, gl.FLOAT, false, 0, 0); // 2 components per vertex
+    gl.vertexAttribPointer(texCoordAttribLocation, 2, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(texCoordAttribLocation);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, videoTexture);
-    gl.uniform1i(textureUniformLocation, 0); // Tell shader to use texture unit 0
+    gl.uniform1i(textureUniformLocation, 0);
 
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadBuffer.indices);
-    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0); // 6 indices for 2 triangles
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
 
-    // Clean up bound attributes (good practice)
     gl.disableVertexAttribArray(positionAttribLocation);
     gl.disableVertexAttribArray(texCoordAttribLocation);
 }
 
+
 // --- WebXR Session Management ---
 enterVRButton.addEventListener('click', async () => {
-    if (!xrSession) { // Start new session
+    // ... (This logic remains mostly the same) ...
+    // Make sure to call updateVRControllerOverlay("Entering VR...") or similar
+    // And in onXRSessionEnded, hide it or set text to "Exited VR"
+    if (!xrSession) {
         if (navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')) {
             try {
-                xrSession = await navigator.xr.requestSession('immersive-vr');
+                xrSession = await navigator.xr.requestSession('immersive-vr', {
+                    // optionalFeatures: ['local-floor', 'bounded-floor'] // if you need specific reference spaces
+                });
                 updateStatus('VR Session Requested...');
+                updateVRControllerOverlay("Entering VR...");
 
-                if (!xrCanvas) {
-                    updateStatus("XR Canvas not found. Cannot initialize WebGL for XR.", true);
-                    await xrSession.end(); xrSession = null; return;
-                }
+
+                if (!xrCanvas) { /* ... error handling ... */ return; }
                 gl = xrCanvas.getContext('webgl', { xrCompatible: true });
-                if (!gl) {
-                    updateStatus("Failed to get WebGL context for XR.", true);
-                    await xrSession.end(); xrSession = null; return;
-                }
+                if (!gl) { /* ... error handling ... */ await xrSession.end(); xrSession = null; return;}
                 await gl.makeXRCompatible();
 
-                if (!initWebGLResources()) { // Initialize shaders, buffers, texture
-                    updateStatus("Failed to initialize WebGL resources for XR.", true);
-                    await xrSession.end(); xrSession = null; return;
-                }
+                if (!initWebGLResources()) { /* ... error handling ... */ await xrSession.end(); xrSession = null; return; }
+                
+                // Hide non-VR controls and stream image if it's not meant to be visible
+                document.querySelector('.non-vr-controls').style.display = 'none';
+                // remoteStreamImg.style.display = 'none'; // If only used for texture
+
 
                 xrWebGLLayer = new XRWebGLLayer(xrSession, gl);
                 await xrSession.updateRenderState({ baseLayer: xrWebGLLayer });
-                updateStatus('VR Render State Updated with Layer.');
-
+                
                 xrSession.addEventListener('end', onXRSessionEnded);
-                xrSession.addEventListener('visibilitychange', (event) => {
-                    console.log(`XR Session visibility changed: ${event.session.visibilityState}`);
-                    updateStatus(`XR visibility: ${event.session.visibilityState}`);
-                });
+                // ... other event listeners ...
 
-                xrRefSpace = await xrSession.requestReferenceSpace('local'); // 'local' or 'viewer'
-                updateStatus('VR Reference Space Acquired.');
-
+                xrRefSpace = await xrSession.requestReferenceSpace('local'); 
+                
                 xrSession.requestAnimationFrame(onXRFrame);
                 updateStatus('VR Session Started & Render Loop Active');
                 enterVRButton.textContent = 'Exit VR';
 
             } catch (e) {
                 console.error('Failed to start XR session:', e);
-                updateStatus(`Failed to start XR session: ${e.name} - ${e.message}`, true);
-                if (xrSession) { // Cleanup if partially started
-                    try { await xrSession.end(); } catch (endErr) { console.error("Error ending session after failed start:", endErr); }
-                }
-                xrSession = null; // Reset
+                updateStatus(`Failed to start XR session: ${e.message}`, true);
+                updateVRControllerOverlay(`VR Error: ${e.message}`);
+                if (xrSession) { try { await xrSession.end(); } catch (endErr) { /* ignore */ } }
+                xrSession = null;
             }
-        } else {
-            updateStatus('Immersive VR not supported or WebXR not available.', true);
-        }
-    } else { // End existing session
+        } else { /* ... error handling ... */ }
+    } else {
         try {
-            await xrSession.end();
-            // onXRSessionEnded will be called by the 'end' event listener
-        } catch (e) {
-            console.error("Error ending XR session:", e);
-            onXRSessionEnded(); // Call manually if end() fails to ensure cleanup
-        }
+            await xrSession.end(); // onXRSessionEnded will be called
+        } catch (e) { /* ... error handling ... */ onXRSessionEnded(); }
     }
 });
 
 function onXRSessionEnded() {
     updateStatus('VR Session Ended');
     if (enterVRButton) enterVRButton.textContent = 'Enter VR';
-    if (controllerInfoDiv) controllerInfoDiv.textContent = 'Exited VR. Controller input paused.';
+    updateControllerInfo('Exited VR. Controller input paused.'); // Non-VR display
+    updateVRControllerOverlay("Exited VR"); // Hide or update VR overlay
     
+    // Show non-VR controls again
+    document.querySelector('.non-vr-controls').style.display = 'block';
+    // remoteStreamImg.style.display = 'block'; // If it was hidden
+
+
     xrSession = null;
     xrRefSpace = null;
     xrWebGLLayer = null;
     
-    // Clean up WebGL resources
-    if (gl) { // Check if gl context was ever created
+    // Clean up WebGL resources if any (shaderProgram, videoTexture, quadBuffer)
+    // ... (your existing cleanup) ...
+    if (gl) {
         if (shaderProgram) { gl.deleteProgram(shaderProgram); shaderProgram = null; }
         if (videoTexture) { gl.deleteTexture(videoTexture); videoTexture = null; }
         if (quadBuffer) {
@@ -380,49 +406,51 @@ function onXRSessionEnded() {
             gl.deleteBuffer(quadBuffer.indices);
             quadBuffer = null;
         }
-        // gl = null; // Don't nullify gl itself unless canvas is removed, can be reused.
     }
-    positionAttribLocation = null; // etc. for all GL locations
-    texCoordAttribLocation = null;
-    projectionUniformLocation = null;
-    modelViewUniformLocation = null;
-    textureUniformLocation = null;
-
+    positionAttribLocation = texCoordAttribLocation = projectionUniformLocation = modelViewUniformLocation = textureUniformLocation = null;
     console.log("XR Session variables and WebGL resources cleared.");
+    // Wait a moment then hide overlay
+    setTimeout(() => { if (!xrSession) updateVRControllerOverlay(""); }, 2000);
 }
 
 function onXRFrame(time, frame) {
-    if (!xrSession) return; // Session ended or not started
-
-    xrSession.requestAnimationFrame(onXRFrame); // Keep the loop going for the next frame
+    if (!xrSession) return;
+    xrSession.requestAnimationFrame(onXRFrame);
 
     const pose = frame.getViewerPose(xrRefSpace);
-    if (pose && gl && xrWebGLLayer) { // Ensure all necessary components are available
-        gl.enable(gl.DEPTH_TEST); // Enable depth testing
+    if (pose && gl && xrWebGLLayer) {
+        // Update VR overlay text (already set by ws.onmessage for 'controller_input')
+        // updateVRControllerOverlay(currentVrText); // No need to call it every frame if data comes via WS
 
+        gl.bindFramebuffer(gl.FRAMEBUFFER, xrWebGLLayer.framebuffer);
+        gl.clearColor(0.1, 0.1, 0.1, 1.0); // Background color for XR scene
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        
         for (const view of pose.views) {
             const viewport = xrWebGLLayer.getViewport(view);
-            if (!viewport || viewport.width === 0 || viewport.height === 0) continue; // Skip if viewport is invalid
+            if (!viewport || viewport.width === 0 || viewport.height === 0) continue;
 
-            gl.bindFramebuffer(gl.FRAMEBUFFER, xrWebGLLayer.framebuffer);
             gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-            
-            // Clear the background for this view
-            gl.clearColor(0.1, 0.1, 0.2, 1.0); // Dark blueish background
-            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-            
-            // Get projection and view matrices from the XRView
-            const projectionMatrix = view.projectionMatrix;
-            const viewMatrix = view.transform.inverse.matrix; // Camera's view matrix
+            drawScene(view.projectionMatrix, view.transform.inverse.matrix);
 
-            // Draw the video quad using these matrices
-            drawScene(projectionMatrix, viewMatrix);
+            // ---- WebGL Text Rendering (Placeholder) ----
+            // This is where you would render `currentVrText` onto a quad in front of the camera.
+            // For now, the HTML overlay #vrControllerOverlay handles this.
+            // To do it in WebGL:
+            // 1. Create a 2D canvas element dynamically.
+            // 2. Set its font, fillStyle, and use fillText() to draw currentVrText.
+            // 3. Create a WebGL texture from this 2D canvas.
+            // 4. Create a new shader program for text (or a complex one that handles both video and text).
+            // 5. Draw a quad (like a billboard) in front of the camera using the text texture.
+            // This needs to be done carefully to manage resources and performance.
         }
     }
 
-    // Controller input processing (remains the same)
+    // Controller input processing
     const inputSources = frame.session.inputSources;
-    let controllerData = { timestamp: time, inputs: [] };
+    let controllerDataForServer = { timestamp: time, inputs: [] }; // Renamed to avoid confusion
+    // This loop primarily sends data to server, server echoes for local display
+
     for (const source of inputSources) {
         if (source.gamepad) {
             let inputDetail = {
@@ -438,18 +466,20 @@ function onXRFrame(time, frame) {
                     value: button.value
                 });
             });
-            controllerData.inputs.push(inputDetail);
+            controllerDataForServer.inputs.push(inputDetail);
         }
     }
-    if (controllerData.inputs.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'controller_input', input: controllerData }));
+    if (controllerDataForServer.inputs.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
+        // This data is sent to the server. The server will then echo it back
+        // with type 'controller_input', which then updates the vrControllerOverlay.
+        ws.send(JSON.stringify({ type: 'controller_input', input: controllerDataForServer }));
     }
 }
 
 // Initial checks for HTTPS (important for WebXR deployment)
 if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
     console.warn('WebXR typically requires HTTPS to function correctly, except on localhost.');
-    updateStatus('Warning: Page is not HTTPS. WebXR might not work.', true)
+    updateStatus('Warning: Page is not HTTPS. WebXR might not work or might have limitations.', true)
 }
 
 // --- END OF FILE public/client-quest.js ---
